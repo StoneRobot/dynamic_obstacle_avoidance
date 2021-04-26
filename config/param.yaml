@@ -1,0 +1,39 @@
+framework:
+  move_group: arm
+
+default_controller: arm_joint_controller
+servo_controller: joint_group_position_controller
+
+link: ["link2", "link3", "link4", "link5", "link6", "pick_link"]
+
+max_iter: 10000
+safety_distance: 0.3
+
+# 目标规划器参数
+target_zeta: 0.5
+
+target_alfa: 1.0
+dist_att: 0.1
+
+target_alfa_rot: 0.5
+dist_att_config: 0.5
+
+# 允许误差
+target_err: 0.02
+target_err_ori: 0.017444444
+
+# 轨迹跟随器参数
+trajectory_zeta: 10.0
+tra_alfa: 2.0
+tra_dist_att: 2.0
+
+tra_alfa_rot: 0.05
+tra_dist_att_config: 0.2
+
+global_trajectory_att_outer: 0.3
+global_trajectory_att_inner: 0.02
+
+# 避障规划器参数
+obs_eta: [-0.01, -0.01, -0.01, -0.01, -0.01, -0.01]
+obs_rep: [0.03, 0.03, 0.03, 0.03, 0.03, 0.03]
+obs_alfa: [0.01, 0.01, 0.01, 0.01, 0.01, 0.01]
