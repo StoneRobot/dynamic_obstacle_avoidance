@@ -178,7 +178,7 @@ double ApfLocalPlanner::getDistance(const geometry_msgs::PoseStamped &pose1, con
     return sqrt(d);
 }
 
-double ApfLocalPlanner::getDistance(const Eigen::Isometry3d& pose1, const std::vector<double>& pose2)
+double ApfLocalPlanner::getDistance(const Eigen::Isometry3d &pose1, const std::vector<double> &pose2)
 {
     double d = pow((pose2[0] - pose1(0, 3)), 2) + pow((pose2[1] - pose1(1, 3)), 2) + pow((pose2[2] - pose1(2, 3)), 2);
     return sqrt(d);
@@ -219,11 +219,7 @@ int ApfLocalPlanner::getJointForce()
         getTargetPoseForce();
     }
     // getObstacleForce();
-    m_all_force = m_joint_att_trajectory_p * m_apf->tra_alfa 
-                + m_joint_att_trajectory_w * m_apf->tra_alfa_rot 
-                + m_joint_att_force_p * m_apf->target_alfa 
-                + m_joint_att_force_w * m_apf->target_alfa_rot 
-                + m_joint_rep_force;
+    m_all_force = m_joint_att_trajectory_p * m_apf->tra_alfa + m_joint_att_trajectory_w * m_apf->tra_alfa_rot + m_joint_att_force_p * m_apf->target_alfa + m_joint_att_force_w * m_apf->target_alfa_rot + m_joint_rep_force;
 }
 
 int ApfLocalPlanner::getTrajectoryForce()
@@ -231,23 +227,25 @@ int ApfLocalPlanner::getTrajectoryForce()
     if (getNearbyPoint())
     {
         Eigen::Vector3d euler_err;
-        Eigen::Vector3d euler_err1;
-        getOrienError(m_current_target_link_pose, (*m_tcp_trajectory_iter), euler_err1);
-        euler_err = getOrienError(m_current_target_link_pose, (*m_tcp_trajectory_iter));
+        double position_err;
+        // Eigen::Vector3d euler_err1;
+        getOrienError(m_current_target_link_pose, (*m_tcp_trajectory_iter), euler_err);
+        position_err = finishPosition(m_current_target_link_pose, (*m_tcp_trajectory_iter));
+        // euler_err = getOrienError(m_current_target_link_pose, (*m_tcp_trajectory_iter));
         Eigen::Matrix<double, 3, 1> err_p = Eigen::Matrix<double, 3, 1>::Identity();
         Eigen::Matrix<double, 3, 1> err_w = Eigen::Matrix<double, 3, 1>::Identity();
         for (int i = 0; i < 3; ++i)
         {
-            err_p(i, 0) = -m_apf->tra_dist_att * m_apf->trajectory_zeta * (m_current_p(i, 0) - (*m_tcp_trajectory_iter)(i, 3));
-            err_w(i, 0) = m_apf->tra_dist_att_config * m_apf->trajectory_zeta * euler_err(2 - i);
+            err_p(i, 0) = -m_apf->tra_dist_att * m_apf->trajectory_zeta * (m_current_p(i, 0) - (*m_tcp_trajectory_iter)(i, 3)) * (1/abs(position_err));
+            if (i == 1)
+            {
+                err_w(i, 0) = m_apf->dist_att_config * m_apf->target_zeta * euler_err(2 - i) * (1 / abs(euler_err.sum()));
+                continue;
+            }
+            err_w(i, 0) = -m_apf->tra_dist_att_config * m_apf->trajectory_zeta * euler_err(2 - i) * (1 / abs(euler_err.sum()));
         }
         Eigen::MatrixXd link_volecity_v = m_volecity_transform.block<6, 3>(0, 0) * err_p;
         Eigen::MatrixXd link_volecity_w = m_volecity_transform.block<6, 3>(0, 3) * err_w;
-
-        // cout << "m_volecity_transform.block<6, 3>(0, 0)" << endl
-        //      << m_volecity_transform.block<6, 3>(0, 0) << endl;
-        //    cout << "m_volecity_transform.block<6, 3>(0, 3)" << endl
-        //      << m_volecity_transform.block<6, 3>(0, 3) << endl;
 
         m_joint_att_trajectory_p = m_all_jacobian[m_link_name.size() - 2] * link_volecity_v;
         m_joint_att_trajectory_w = m_all_jacobian[m_link_name.size() - 2] * link_volecity_w;
@@ -259,6 +257,7 @@ int ApfLocalPlanner::getTrajectoryForce()
 bool ApfLocalPlanner::getNearbyPoint()
 {
     static int cnt = 0;
+    bool flag = false;
     std::list<Eigen::Isometry3d>::iterator iter = m_tcp_trajectory_iter;
     int index = m_trajectory_point_index;
     geometry_msgs::PoseStamped current_pose;
@@ -276,8 +275,8 @@ bool ApfLocalPlanner::getNearbyPoint()
                 ++cnt;
                 // for (size_t i = 0; i < m_obs_pose.size(); i++)
                 // {
-                //     double dis = getDistance((*iter), m_obs_pose[i]);
-                //     if (dis < 0.1)
+                //     double dis_obs = getDistance((*iter), m_obs_pose[i]);
+                //     if (dis_obs < 0.05)
                 //         iter_push_index = 500;
                 // }
                 if (cnt >= iter_push_index)
@@ -285,22 +284,35 @@ bool ApfLocalPlanner::getNearbyPoint()
                     ++iter;
                     ++index;
                     cnt = 0;
+                    if (index >= m_tcp_trajectory.size())
+                    {
+                        setTrajectoryIndex(index, iter);
+                        flag = false;
+                        break;
+                    }
                     ROS_INFO_STREAM("trajectory_point(cnt): " << index);
                 }
+                setTrajectoryIndex(index, iter);
+                flag = true;
+                break;
             }
             setTrajectoryIndex(index, iter);
-            return true;
+            cnt = 0;
+            flag = true;
+            break;
         }
         ++index;
         cnt = 0;
         if (index >= m_tcp_trajectory.size())
         {
+            ++iter;
             setTrajectoryIndex(index, iter);
+            flag = false;
             break;
         }
         ROS_INFO_STREAM("trajectory_point(iter): " << index);
     }
-    return false;
+    return flag;
 }
 
 void ApfLocalPlanner::setTrajectoryIndex(int index, std::list<Eigen::Isometry3d>::iterator &iter)
@@ -312,15 +324,23 @@ void ApfLocalPlanner::setTrajectoryIndex(int index, std::list<Eigen::Isometry3d>
 int ApfLocalPlanner::getTargetPoseForce()
 {
 
+    // Eigen::Vector3d euler_err1;
     Eigen::Vector3d euler_err;
+    double position_err;
     getOrienError(m_current_target_link_pose, m_target_pose_e, euler_err);
-    euler_err = getOrienError(m_current_target_link_pose, m_target_pose_e);
+    // euler_err = getOrienError(m_current_target_link_pose, m_target_pose_e);
+    position_err = finishPosition(m_current_target_link_pose, (*m_tcp_trajectory_iter));
     Eigen::Matrix<double, 3, 1> err_p;
     Eigen::Matrix<double, 3, 1> err_w;
     for (int i = 0; i < 3; ++i)
     {
-        err_p(i, 0) = -m_apf->dist_att * m_apf->target_zeta * (m_current_p(i, 0) - (m_target_pose_e(i, 3)));
-        err_w(i, 0) = m_apf->dist_att_config * m_apf->target_zeta * euler_err(2 - i);
+        err_p(i, 0) = -m_apf->dist_att * m_apf->target_zeta * (m_current_p(i, 0) - (m_target_pose_e(i, 3))) * (1/pow(abs(position_err), 2));
+        if (i == 1)
+        {
+            err_w(i, 0) = m_apf->dist_att_config * m_apf->target_zeta * euler_err(2 - i) * (1 / abs(euler_err.sum()));
+            continue;
+        }
+        err_w(i, 0) = -m_apf->dist_att_config * m_apf->target_zeta * euler_err(2 - i) * (1 / abs(euler_err.sum()));
     }
 
     Eigen::MatrixXd link_volecity_v = m_volecity_transform.block<6, 3>(0, 0) * err_p;
@@ -381,7 +401,7 @@ void ApfLocalPlanner::getOrienError(const geometry_msgs::PoseStamped &pc, const 
     Eigen::Quaterniond q1c(pc.pose.orientation.w, pc.pose.orientation.x, pc.pose.orientation.y, pc.pose.orientation.z);
     Eigen::Quaterniond q2t(pt.rotation());
     Eigen::Quaterniond e_q = q2t * q1c.inverse();
-    euler_angle = e_q.matrix().eulerAngles(2, 1, 0);
+    euler_angle = e_q.matrix().eulerAngles(0, 1, 2);
 }
 
 Eigen::Vector3d ApfLocalPlanner::getOrienError(const geometry_msgs::PoseStamped &p, const Eigen::Isometry3d &p2)
@@ -482,7 +502,7 @@ Eigen::Isometry3d ApfLocalPlanner::getTransform(const std::string &target_link, 
     {
         listenter.lookupTransform(target_link, source_link, ros::Time(0), transform);
     }
-    catch(const tf::LookupException& e)
+    catch (const tf::LookupException &e)
     {
         std::cerr << e.what() << '\n';
         exit(-1);
