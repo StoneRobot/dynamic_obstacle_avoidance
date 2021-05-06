@@ -3,6 +3,7 @@
 #include <controller_manager_msgs/SwitchController.h>
 #include <vector>
 #include <set>
+#include <visualization_msgs/MarkerArray.h>
 using namespace std;
 
 Framework::Framework(ros::NodeHandle *nh)
@@ -23,6 +24,7 @@ Framework::Framework(ros::NodeHandle *nh)
     m_execute_ser = m_nh->advertiseService("execute", &Framework::executeCB, this);
 
     m_set_obstacle_sub = m_nh->subscribe("set_obstacle", 10, &Framework::setObstacleCB, this);
+    m_pub_obs_mark_array_pub = m_nh->advertise<visualization_msgs::MarkerArray>("visualization_marker2", 100);
     m_switch_controller_clinet = m_nh->serviceClient<controller_manager_msgs::SwitchController>("/controller_manager/switch_controller");
 
     m_is_servo_controller = false;
@@ -96,18 +98,39 @@ bool Framework::executeCB(dynamic_obstacle_avoidance::Execute::Request &req, dyn
 
 void Framework::setObstacleCB(const dynamic_obstacle_avoidance::SetObstacleConstPtr &msg)
 {
+    static std::vector<int> obs_name;
+    visualization_msgs::MarkerArray remove_mark;
+    remove_mark.markers.resize(1);
+    remove_mark.markers[0].action = remove_mark.markers[0].DELETEALL;
+    m_pub_obs_mark_array_pub.publish(remove_mark);
+
     // set<vector<double>> pose_set;
     vector<vector<double>> pose;
     pose.resize(msg->pose.size());
+    visualization_msgs::MarkerArray mark_array_msgs;
+    mark_array_msgs.markers.resize(msg->pose.size());
     for (size_t i = 0; i < pose.size(); i++)
     {
         pose[i].resize(3);
         // pose_set.insert()
+        mark_array_msgs.markers[i].header.frame_id = "world";
+        mark_array_msgs.markers[i].id = i;
+        mark_array_msgs.markers[i].type = mark_array_msgs.markers[i].SPHERE;
+        mark_array_msgs.markers[i].action = mark_array_msgs.markers[i].ADD;
+        mark_array_msgs.markers[i].pose.position.x = msg->pose[i].data[0];
+        mark_array_msgs.markers[i].pose.position.y = msg->pose[i].data[1];
+        mark_array_msgs.markers[i].pose.position.z = msg->pose[i].data[2];
+        mark_array_msgs.markers[i].scale.x = 0.05;
+        mark_array_msgs.markers[i].scale.y = 0.05;
+        mark_array_msgs.markers[i].scale.z = 0.05;
+        mark_array_msgs.markers[i].color.a = 1;
+        mark_array_msgs.markers[i].color.r = 1;
         for (size_t j = 0; j < 3; j++)
         {
             pose[i][j] = msg->pose[i].data[j];
         }
     }
+    m_pub_obs_mark_array_pub.publish(mark_array_msgs);
     m_local_planner->setObstacle(pose);
 }
 

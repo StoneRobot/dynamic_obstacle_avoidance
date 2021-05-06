@@ -12,8 +12,8 @@ safety_distance: 0.3
 # 目标规划器参数
 target_zeta: 1
 
-target_alfa: 0.5
-dist_att: 0.5
+target_alfa: 10
+dist_att: 10
 
 target_alfa_rot: 0.5
 dist_att_config: 0.5
@@ -31,9 +31,10 @@ tra_alfa_rot: 0.5
 tra_dist_att_config: 0.5
 
 global_trajectory_att_outer: 0.3
-global_trajectory_att_inner: 0.02
+global_trajectory_att_inner: 0.08
+# global_trajectory_att_inner: 0.02
 
 # 避障规划器参数
-obs_eta: [0.01, 0.01, 0.01, 0.01, 0.01, 0.01]
-obs_rep: [0.03, 0.03, 0.03, 0.03, 0.03, 0.03]
+obs_eta: [0.02, 0.02, 0.02, 0.02, 0.02, 0.1]
+# obs_rep: [0.01, 0.01, 0.01, 0.01, 0.01, 0.01]
 obs_alfa: [0.01, 0.01, 0.01, 0.01, 0.01, 0.01]

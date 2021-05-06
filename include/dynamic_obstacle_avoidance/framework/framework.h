@@ -44,6 +44,9 @@ private:
     ros::ServiceServer m_set_target_pose_ser;
     ros::ServiceServer m_execute_ser;
     ros::Subscriber m_set_obstacle_sub;
+    ros::Publisher m_pub_obs_mark_array_pub;
+    ros::Publisher m_del_obs_mark_array_pub;
+
 
     ros::ServiceClient m_switch_controller_clinet;
 
@@ -51,4 +54,5 @@ private:
     std::string m_servo_controller;
 
     bool m_is_servo_controller;
+    
 };

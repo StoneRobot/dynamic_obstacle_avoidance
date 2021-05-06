@@ -35,7 +35,7 @@ struct ApfParam
     // 障碍物
     // link
     std::vector<double> obs_eta;
-    std::vector<double> obs_rep;
+    // std::vector<double> obs_rep;
     std::vector<double> obs_alfa;
 
 };
@@ -87,6 +87,8 @@ private:
 
     Eigen::Isometry3d getTransform(const std::string& target_link, const std::string& source_link);
 
+    double getRandon(double a, double b);
+
     std::vector<double> m_current_joint_value;
     std::vector<double> m_current_joint_velocity;
 
@@ -102,7 +104,7 @@ private:
     Eigen::Matrix<double, 6, 1> m_joint_att_trajectory_p;
     Eigen::Matrix<double, 6, 1> m_joint_att_trajectory_w;
     Eigen::Matrix<double, 6, 1> m_joint_rep_force;
-    Eigen::MatrixXd m_all_force;
+    Eigen::Matrix<double, 6, 1> m_all_force;
 
     Eigen::Matrix<double, 6, 6> m_volecity_transform;
 

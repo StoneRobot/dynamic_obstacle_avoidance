@@ -15,7 +15,6 @@ ServoMove::~ServoMove()
 
 bool ServoMove::moveJointServo(const control_msgs::JointJog &jog)
 {
-    
     m_joint_serve_pub.publish(jog);
     return true;
 }
