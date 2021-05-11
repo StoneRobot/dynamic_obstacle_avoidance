@@ -35,12 +35,17 @@ ApfLocalPlanner::~ApfLocalPlanner()
 
 int ApfLocalPlanner::execute()
 {
+    // 记录迭代次数
     m_apf->iter = 0;
+    // 全局轨迹的点的迭代器
     m_trajectory_point_index = 1;
     m_tcp_trajectory_iter = m_tcp_trajectory.begin();
     ++m_tcp_trajectory_iter;
+
     int flag = 0;
+    // 全局轨迹执行器
     flag = executeGlobalTra();
+    // 局部规划器
     if (flag == -1)
         flag = executeApf();
     return flag;
@@ -89,13 +94,15 @@ int ApfLocalPlanner::executeApf()
 {
     int flag = 0;
     getLinkPose();
+    // 先确定姿态和位置的总误差
     m_current_target_link_pose = m_move_group->getCurrentPose(m_eef);
     double position_err = finishPosition(m_current_target_link_pose, m_target_pose_e);
     double orien_err = finishOrien(m_current_target_link_pose, m_target_pose_e);
+
     while (ros::ok() && !m_is_stop && (position_err > m_apf->target_err || orien_err > m_apf->target_err_ori))
     {
         clock_t t1 = clock();
-
+        // 获取jacobian矩阵 
         m_robot_jacobian->getAllJacobian(m_all_jacobian);
         vector<Eigen::MatrixXd> jacobian_p;
         jacobian_p.resize(m_link_name.size());
@@ -108,16 +115,20 @@ int ApfLocalPlanner::executeApf()
         m_target_jacobian_w = m_all_jacobian[m_link_name.size() - 2].block<6, 3>(0, 3);
         m_target_jacobian_p = m_all_jacobian[m_link_name.size() - 2].block<6, 3>(0, 0);
 
+
+        // 填充一些位置的变量，方便调用不用写那么长 
         getLinkPose();
         m_current_target_link_pose = m_move_group->getCurrentPose(m_eef);
         m_current_p(0, 0) = m_current_target_link_pose.pose.position.x;
         m_current_p(1, 0) = m_current_target_link_pose.pose.position.y;
         m_current_p(2, 0) = m_current_target_link_pose.pose.position.z;
 
+        // 更新障碍物的距离
         getObstacleDistance();
-
+        // 主要进行局部规划的地方
         getJointForce();
 
+        // 以下都是伺服执行和一些是否参数的打印
         control_msgs::JointJog jog;
         jog.header = m_trajectory.joint_trajectory.header;
         jog.joint_names = m_trajectory.joint_trajectory.joint_names;
@@ -217,34 +228,42 @@ int ApfLocalPlanner::getJointForce()
     m_joint_att_force_p.fill(0);
     m_joint_rep_force.fill(0);
     m_all_force.fill(0);
+    // 全局的轨迹跟随器
     if (getTrajectoryForce() != 0)
     {
+        // 目标跟随器，只有当全局轨迹跟随器找不到适合的轨迹点才会生效
         getTargetPoseForce();
     }
+    // 障碍物的斥力
     getObstacleForce();
+    // 前面获取的力的合成
     m_all_force = m_joint_att_trajectory_p * m_apf->tra_alfa + m_joint_att_trajectory_w * m_apf->tra_alfa_rot + m_joint_att_force_p * m_apf->target_alfa + m_joint_att_force_w * m_apf->target_alfa_rot + m_joint_rep_force;
 }
 
 int ApfLocalPlanner::getTrajectoryForce()
 {
+    // 从全局轨迹中选取符合跟随器的点，如果符合返回true，如果机器人震荡，和这个函数有较大的关系
     if (getNearbyPoint())
     {
         Eigen::Vector3d euler_err;
         double position_err;
-        // Eigen::Vector3d euler_err1;
+        // 获取位置误差和姿态误差
         getOrienError(m_current_target_link_pose, (*m_tcp_trajectory_iter), euler_err);
         position_err = finishPosition(m_current_target_link_pose, (*m_tcp_trajectory_iter));
-        // euler_err = getOrienError(m_current_target_link_pose, (*m_tcp_trajectory_iter));
+
+        // 人工势场法
         Eigen::Matrix<double, 3, 1> err_p = Eigen::Matrix<double, 3, 1>::Identity();
         Eigen::Matrix<double, 3, 1> err_w = Eigen::Matrix<double, 3, 1>::Identity();
         for (int i = 0; i < 3; ++i)
         {
+            // 后面乘以误差的倒数，是为了自适应，建议调整公式
             err_p(i, 0) = -m_apf->tra_dist_att * m_apf->trajectory_zeta * (m_current_p(i, 0) - (*m_tcp_trajectory_iter)(i, 3)) * (1 / pow(abs(position_err), 2));
             err_w(i, 0) = m_apf->tra_dist_att_config * m_apf->trajectory_zeta * euler_err(i) * (1 / abs(euler_err.sum()));
         }
+        // 利用速度转移矩阵将pick_link的速度转移到link6
         Eigen::MatrixXd link_volecity_v = m_volecity_transform.block<6, 3>(0, 0) * err_p;
         Eigen::MatrixXd link_volecity_w = m_volecity_transform.block<6, 3>(0, 3) * err_w;
-
+        // 利用jacobian矩阵将末端速度转化为角速度
         m_joint_att_trajectory_p = m_all_jacobian[m_link_name.size() - 2] * link_volecity_v;
         // m_joint_att_trajectory_w = m_all_jacobian[m_link_name.size() - 2] * link_volecity_w;
         return 0;
@@ -263,6 +282,11 @@ bool ApfLocalPlanner::getNearbyPoint()
     current_pose = m_move_group->getCurrentPose(m_eef);
     int iter_push_index = 2000;
 
+    // 选取轨迹点的方法
+    // 选择在global_trajectory_att_outer
+    // 和global_trajectory_att_inner范围的点，
+    // 如果范围太小，速度太大，则会造成震荡
+    // 如果这个附近有障碍物，则减少对这个点的迭代次数
     for (; iter != m_tcp_trajectory.end(); ++iter)
     {
         double dis = getDistance(current_pose, (*iter));
@@ -325,22 +349,23 @@ void ApfLocalPlanner::setTrajectoryIndex(int index, std::list<Eigen::Isometry3d>
 int ApfLocalPlanner::getTargetPoseForce()
 {
 
-    // Eigen::Vector3d euler_err1;
     Eigen::Vector3d euler_err;
     double position_err;
+    // 获取误差
     getOrienError(m_current_target_link_pose, m_target_pose_e, euler_err);
-    // euler_err = getOrienError(m_current_target_link_pose, m_target_pose_e);
     position_err = finishPosition(m_current_target_link_pose, (*m_tcp_trajectory_iter));
     Eigen::Matrix<double, 3, 1> err_p;
     Eigen::Matrix<double, 3, 1> err_w;
+    // 人工势场
     for (int i = 0; i < 3; ++i)
     {
         err_p(i, 0) = -m_apf->dist_att * m_apf->target_zeta * (m_current_p(i, 0) - m_target_pose_e(i, 3)) * (1 / abs(position_err));
         err_w(i, 0) = m_apf->dist_att_config * m_apf->target_zeta * euler_err(i) * (1 / abs(euler_err.sum()));
     }
-
+    // 速度转移矩阵
     Eigen::MatrixXd link_volecity_v = m_volecity_transform.block<6, 3>(0, 0) * err_p;
     Eigen::MatrixXd link_volecity_w = m_volecity_transform.block<6, 3>(0, 3) * err_w;
+    // jacobian
     m_joint_att_force_p = m_all_jacobian[m_link_name.size() - 2] * link_volecity_v;
     // m_joint_att_force_w = m_all_jacobian[m_link_name.size() - 2] * link_volecity_w;
 
@@ -362,19 +387,25 @@ int ApfLocalPlanner::getObstacleForce()
         {
             joint_rep_force[i][j].fill(0);
             obs_rep[i][j].fill(0);
+            // 不在范围内的障碍物忽略
             if (m_obs_distance[i][j] > m_apf->safety_distance)
             {
                 obs_rep[i][j] << 0, 0, 0;
                 continue;
             }
+            // 人工势场法
             for (int k = 0; k < 3; ++k)
             {
                 double dis = m_current_p(k, 0) - m_obs_pose[j][k];
                 obs_rep[i][j](k, 0) = m_apf->obs_eta[i] * (1 / m_obs_distance[i][j] - 1 / m_apf->safety_distance) * (1 / (m_obs_distance[i][j] * m_obs_distance[i][j])) * (dis / m_obs_distance[i][j]);
+                // 逃脱局部最小值
                 obs_rep[i][j](k, 0) = obs_rep[i][j](k, 0) * getRandon(1.3, 1.8);
             }
+            // 利用jacobian矩阵将每一个连杆的速度转移到关节上
             joint_rep_force[i][j] = m_jacobian_p[i] * obs_rep[i][j];
+            // 取比例
             joint_rep_force[i][j] *= m_apf->obs_alfa[i];
+            // 全部障碍物的斥力速度合成在一起
             m_joint_rep_force += joint_rep_force[i][j];
         }
     }

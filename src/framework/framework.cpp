@@ -73,6 +73,7 @@ int Framework::execute()
     list<Eigen::Isometry3d> tcp_tra;
     m_global_planner->getTrajectory(tra, tcp_tra);
     m_local_planner->setTragectory(tra, tcp_tra);
+    // 进行局部规划
     flag = m_local_planner->execute();
     servoSwitchController(false);
     return flag;

@@ -24,8 +24,8 @@ target_err_ori: 0.017444444
 
 # 轨迹跟随器参数
 trajectory_zeta: 1.0
-tra_alfa: 1.2
-tra_dist_att: 1.2
+tra_alfa: 1
+tra_dist_att: 1
 
 tra_alfa_rot: 0.5
 tra_dist_att_config: 0.5
