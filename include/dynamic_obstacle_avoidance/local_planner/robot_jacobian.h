@@ -3,6 +3,9 @@
 #include <moveit/move_group_interface/move_group_interface.h>
 #include <vector>
 #include <string>
+#include<iostream> 
+#include<Eigen/Core> 
+#include<Eigen/SVD>
 
 class RobotJacobian
 {
@@ -23,6 +26,3 @@ private:
     robot_model::RobotModelConstPtr model;
     const robot_model::JointModelGroup *j_model_group;
 };
-
-
-

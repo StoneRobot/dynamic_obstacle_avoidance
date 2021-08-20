@@ -15,8 +15,11 @@ class Framework
 public:
     Framework(ros::NodeHandle *nh);
     ~Framework();
+    
+     //setJointTarget 设置关节坐标
+    void setJointTarget(const std::vector<double> &joint); 
 
-    void setJointTarget(const std::vector<double> &joint);
+    //setTargetPose 设置笛卡尔坐标
     void setTargetPose(const geometry_msgs::PoseStamped &p, const std::string &eef);
 
     /**
@@ -26,6 +29,7 @@ public:
     int execute();
 
 private:
+    //CB回调函数
     bool setJointTargetCB(dynamic_obstacle_avoidance::SetJointValue::Request &req, dynamic_obstacle_avoidance::SetJointValue::Response &rep);
     bool setTargetPoseCB(dynamic_obstacle_avoidance::SetTargetPose::Request &req, dynamic_obstacle_avoidance::SetTargetPose::Response &rep);
     bool executeCB(dynamic_obstacle_avoidance::Execute::Request &req, dynamic_obstacle_avoidance::Execute::Response &rep);
@@ -35,24 +39,22 @@ private:
 
 private:
     ros::NodeHandle *m_nh;
-    moveit::planning_interface::MoveGroupInterface *m_move_group;
-    GlobalPlanner *m_global_planner;
-    ILocalPlanner *m_local_planner;
-    IMove *m_move;
+    moveit::planning_interface::MoveGroupInterface *m_move_group;    //运动规划接口
+    GlobalPlanner *m_global_planner;    //全局规划器，进行全局规划
+    ILocalPlanner *m_local_planner;        //局部规划器，进行局部规划。
+    IMove *m_move;                                          //控制机器人执行动作。
 
-    ros::ServiceServer m_set_joint_target_ser;
-    ros::ServiceServer m_set_target_pose_ser;
-    ros::ServiceServer m_execute_ser;
-    ros::Subscriber m_set_obstacle_sub;
-    ros::Publisher m_pub_obs_mark_array_pub;
-    ros::Publisher m_del_obs_mark_array_pub;
+    ros::ServiceServer m_set_joint_target_ser;     //关节目标
+    ros::ServiceServer m_set_target_pose_ser;      //笛卡尔目标
+    ros::ServiceServer m_execute_ser;                       //执行
+    ros::Subscriber m_set_obstacle_sub;                 //订阅障碍物
+    ros::Publisher m_pub_obs_mark_array_pub;            //发布障碍物marker
+    ros::Publisher m_del_obs_mark_array_pub;               //删除发布的障碍物marker
 
+    ros::ServiceClient m_switch_controller_clinet;        //换控制器？
 
-    ros::ServiceClient m_switch_controller_clinet;
-
-    std::string m_default_controller;
+    std::string m_default_controller;            
     std::string m_servo_controller;
 
     bool m_is_servo_controller;
-    
 };

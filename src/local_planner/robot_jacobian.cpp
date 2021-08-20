@@ -23,6 +23,10 @@ bool RobotJacobian::getJacobian(Eigen::MatrixXd &jacobian, const std::string &fr
 {
     Eigen::Vector3d a(0, 0, 0);
     const robot_model::LinkModel *lm = model->getLinkModel(frame);
+
+    // getJacobian(const JointModelGroup* group,                 const LinkModel* link, 
+    //const Eigen::Vector3d& reference_point_position,
+    //Eigen::MatrixXd& jacobian,                        bool use_quaternion_representation = false)
     return current_state->getJacobian(j_model_group, lm, a, jacobian);
 }
 
@@ -36,13 +40,19 @@ bool RobotJacobian::getAllJacobian(std::vector<Eigen::MatrixXd> &jacobians)
     current_state->setJointGroupPositions(j_model_group, j_val);
     for (auto i : m_joint_link)
     {
-
         // clock_t t = clock();
         Eigen::MatrixXd jacobian;
-        getJacobian(jacobian, i);
-        jacobians[n] = jacobian.transpose();
-        // cout << jacobians[n] << endl;
+        getJacobian(jacobian, i);                   
+                      // jacobians[n] = jacobian.transpose();               
+        jacobians[n] =  jacobian.completeOrthogonalDecomposition().pseudoInverse();       //雅可比矩阵   求伪逆
+
+        //cout <<( jacobian.inverse()==jacobians[n] ? " true" : "false" ) << endl;
+        //auto inv = jacobian.inverse();
+              //auto  Ainv =  jacobian.completeOrthogonalDecomposition().pseudoInverse();
+              //auto wei_ni = pseudoInverse(jacobian);   
+        //cout <<n<<":     "<< jacobians[n] << endl;
         // cout << "get one jacobian: " << clock() - t << endl;
+             // cout << Ainv << endl << jacobians[n] << endl;
         ++n;
     }
     return true;

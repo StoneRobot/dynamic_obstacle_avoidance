@@ -1,13 +1,22 @@
 #include "dynamic_obstacle_avoidance/local_planner/apf_local_planner.h"
-
 #include <math.h>
+#include <cmath>
 #include <algorithm>
 #include <time.h>
 #include <tf/transform_listener.h>
 #include <random>
 #include <iostream>
+#include <Eigen/Core>
+#include <Eigen/Geometry>
+#include <fstream>
+#include <iostream>
 
+#define CLAMP(x , min , max) ((x) > (max) ? (max) : ((x) < (min) ? (min) : x))
 using namespace std;
+
+int num=0;
+double Array[1000][3];
+
 
 ApfLocalPlanner::ApfLocalPlanner(ros::NodeHandle *nh, moveit::planning_interface::MoveGroupInterface *group)
     : ILocalPlanner{nh, group},
@@ -17,11 +26,18 @@ ApfLocalPlanner::ApfLocalPlanner(ros::NodeHandle *nh, moveit::planning_interface
     m_nh->param<vector<string>>("link", m_link_name, l);
     m_jacobian_p.resize(m_link_name.size());
     m_robot_jacobian = new RobotJacobian(nh, m_move_group, m_link_name);
-    m_apf = new ApfParam;
+    m_apf = new ApfParam; // ApfParam     势场参数结构体
 
+    //订阅
     m_joint_state_sub = m_nh->subscribe("/joint_states", 10, &ApfLocalPlanner::JointStateCB, this);
 
-    setParam();
+    setParam(); //设置参数
+
+    //获取4x4的转换矩阵
+    //来自Robotics System Toolbox工具箱
+    //m_link_name[m_link_name.size() - 2]=m_link_name[6-2]=m_link_name[4]，即“link6”
+    //同理可得，后面的是“pick_link”
+    //pick_link 转 link6
     Eigen::Isometry3d t = getTransform(m_link_name[m_link_name.size() - 2], m_link_name[m_link_name.size() - 1]);
     tr2jac(t);
 }
@@ -35,19 +51,17 @@ ApfLocalPlanner::~ApfLocalPlanner()
 
 int ApfLocalPlanner::execute()
 {
-    // 记录迭代次数
-    m_apf->iter = 0;
-    // 全局轨迹的点的迭代器
-    m_trajectory_point_index = 1;
-    m_tcp_trajectory_iter = m_tcp_trajectory.begin();
-    ++m_tcp_trajectory_iter;
+    m_apf->iter = 0;              //记录迭代次数
+    m_trajectory_point_index = 1; //全局轨迹的点的迭代器，索引到第二个点
 
+    //c.begin();           返回指向容器 最开始位置数据的指针
+    m_tcp_trajectory_iter = m_tcp_trajectory.begin(); //std::list<Eigen::Isometry3d> m_tcp_trajectory;
+    ++m_tcp_trajectory_iter;
     int flag = 0;
-    // 全局轨迹执行器
-    flag = executeGlobalTra();
-    // 局部规划器
-    if (flag == -1)
-        flag = executeApf();
+
+    flag = executeGlobalTra(); //判断flag   全局轨迹执行器
+    if (flag == -1)            //小于安全距离，执行人工势场法
+        flag = executeApf();   //局部规划器
     return flag;
 }
 
@@ -55,35 +69,49 @@ int ApfLocalPlanner::executeGlobalTra()
 {
     while (ros::ok() && !m_is_stop)
     {
-        static int cnt = 0;
-        getObstacleDistance();
+        static int cnt = 0;    //计量有障碍物在附近的点的逼近次数
+        getObstacleDistance(); //得到m_obs_distance[i][j]的值
         for (size_t i = 0; i < m_obs_distance.size(); i++)
             for (size_t j = 0; j < m_obs_distance[i].size(); j++)
-                if (m_obs_distance[i][j] < m_apf->safety_distance)
+                if (m_obs_distance[i][j] < m_apf->safety_distance) //小于安全距离
                     return -1;
 
-        control_msgs::JointJog jog;
+        //全局规划器，  执行
+        control_msgs::JointJog jog; //第一个jog
         jog.header.frame_id = m_trajectory.joint_trajectory.header.frame_id;
         jog.joint_names = m_trajectory.joint_trajectory.joint_names;
 
-        int index;
+        int index; //表示moveit_servo需要到达的点     指下一个需要执行的点的索引
+
+        //①   _index代表索引， m_trajectory.joint_trajectory.points.size()代表有多少个点
         m_trajectory_point_index == m_trajectory.joint_trajectory.points.size() - 1 ? index = m_trajectory_point_index - 1 : index = m_trajectory_point_index;
+        // 避免到检索到最后一个点              trajectory已经规划好的
+
+        //   jog.velocities[i] 第i+1个关节的速度
         jog.velocities.resize(6);
         for (int i = 0; i < 6; i++)
         {
-            jog.velocities[i] = m_trajectory.joint_trajectory.points[index].velocities[i] * 0.3;
+            //从①中选择合适的点，在②中获取轨迹的速度，然后在下面的moveJointServo执行
+            jog.velocities[i] = m_trajectory.joint_trajectory.points[index].velocities[i] * 1.5; //②                 改     0.3
         }
 
-        jog.duration = m_trajectory.joint_trajectory.points[m_trajectory_point_index].time_from_start.toSec() - m_trajectory.joint_trajectory.points[m_trajectory_point_index - 1].time_from_start.toSec();
+        //两点之间的持续时间
+        jog.duration = m_trajectory.joint_trajectory.points[m_trajectory_point_index].time_from_start.toSec() -
+                       m_trajectory.joint_trajectory.points[m_trajectory_point_index - 1].time_from_start.toSec();
         m_move->moveJointServo(jog);
+
+        //关节角总误差，误差小于设定值才走下一个点
         double err = finishJoint(m_current_joint_value, m_trajectory.joint_trajectory.points[m_trajectory_point_index].positions);
+        //ROS_INFO_STREAM("err: " << err);
         if (err < 0.052333333)
         {
-            ++m_trajectory_point_index;
+            //m_trajectory_point_index++;
+            ++m_trajectory_point_index; //索引
             ROS_INFO_STREAM("m_trajectory_point_index: " << m_trajectory_point_index);
-            ++m_tcp_trajectory_iter;
+            ++m_tcp_trajectory_iter; //容器
         }
         // ++cnt;
+        //到达最后一点
         if (m_trajectory_point_index >= m_trajectory.joint_trajectory.points.size())
             break;
     }
@@ -94,78 +122,91 @@ int ApfLocalPlanner::executeApf()
 {
     int flag = 0;
     getLinkPose();
-    // 先确定姿态和位置的总误差
-    m_current_target_link_pose = m_move_group->getCurrentPose(m_eef);
+    m_current_target_link_pose = m_move_group->getCurrentPose(m_eef); //m_eef表示pick_link
+
+    //位置误差
     double position_err = finishPosition(m_current_target_link_pose, m_target_pose_e);
+
+    //姿态误差
     double orien_err = finishOrien(m_current_target_link_pose, m_target_pose_e);
 
+    //位置、姿态误差大于设定误差时
     while (ros::ok() && !m_is_stop && (position_err > m_apf->target_err || orien_err > m_apf->target_err_ori))
     {
         clock_t t1 = clock();
-        // 获取jacobian矩阵 
+
         m_robot_jacobian->getAllJacobian(m_all_jacobian);
         vector<Eigen::MatrixXd> jacobian_p;
         jacobian_p.resize(m_link_name.size());
 
         for (int i = 0; i < jacobian_p.size(); ++i)
         {
+            //m_jacobian_p为vector， 取第i个雅可比矩阵的前三列赋值给m_jacobian_p的第i个vector      ？
             m_jacobian_p[i] = m_all_jacobian[i].block<6, 3>(0, 0);
+            //m_jacobian_p为vector        每个i为6x3矩阵
         }
-        // link6
+
+        //link6       //这一块没用到
         m_target_jacobian_w = m_all_jacobian[m_link_name.size() - 2].block<6, 3>(0, 3);
         m_target_jacobian_p = m_all_jacobian[m_link_name.size() - 2].block<6, 3>(0, 0);
 
-
-        // 填充一些位置的变量，方便调用不用写那么长 
         getLinkPose();
         m_current_target_link_pose = m_move_group->getCurrentPose(m_eef);
         m_current_p(0, 0) = m_current_target_link_pose.pose.position.x;
         m_current_p(1, 0) = m_current_target_link_pose.pose.position.y;
         m_current_p(2, 0) = m_current_target_link_pose.pose.position.z;
 
-        // 更新障碍物的距离
         getObstacleDistance();
-        // 主要进行局部规划的地方
+
         getJointForce();
 
-        // 以下都是伺服执行和一些是否参数的打印
+        //局部规划的执行器
         control_msgs::JointJog jog;
         jog.header = m_trajectory.joint_trajectory.header;
         jog.joint_names = m_trajectory.joint_trajectory.joint_names;
         jog.velocities.resize(6);
         for (int i = 0; i < m_link_name.size(); ++i)
         {
-            jog.velocities[i] = m_all_force(i, 0);
+            jog.velocities[i] = m_all_force(i, 0); //force即velocity      改
         }
         m_move->moveJointServo(jog);
         m_apf->iter++;
-        if (m_apf->iter > m_apf->max_iter)
+        if (m_apf->iter > m_apf->max_iter) //超过最大迭代次数
         {
             flag = -2;
             m_apf->iter = 0;
             jog.velocities.clear();
             jog.velocities = {0, 0, 0, 0, 0, 0};
-            m_move->moveJointServo(jog);
+            m_move->moveJointServo(jog); //停止运动
             break;
         }
         m_move_group->setStartStateToCurrentState();
         m_current_target_link_pose = m_move_group->getCurrentPose(m_eef);
+
+        //位置误差
         position_err = finishPosition(m_current_target_link_pose, m_target_pose_e);
+
+        //姿态误差
         orien_err = finishOrien(m_current_target_link_pose, m_target_pose_e);
+
         clock_t t2 = clock();
         clock_t dur = t2 - t1;
+        //迭代时间、误差显示
         ROS_INFO_STREAM("iter: " << m_apf->iter << " dur: " << static_cast<double>(dur) / CLOCKS_PER_SEC);
         ROS_INFO_STREAM("position_err: " << position_err << " target_err: " << m_apf->target_err);
         ROS_INFO_STREAM("orien_err: " << orien_err << " target_err_ori: " << m_apf->target_err_ori);
     }
-    if (m_is_stop)
+
+    //异常，非自然停止
+    if (m_is_stop) //m_is_stop
     {
         flag = -3;
         m_apf->iter = 0;
     }
-    return flag;
+    return flag; //？
 }
 
+//四个getDistance函数
 inline double ApfLocalPlanner::getDistance(const geometry_msgs::PoseStamped &pose1, const geometry_msgs::PoseStamped &pose2)
 {
     std::vector<double> p1, p2;
@@ -197,14 +238,17 @@ double ApfLocalPlanner::getDistance(const Eigen::Isometry3d &pose1, const std::v
     return sqrt(d);
 }
 
+//计算距离
+//m_link_pose_vec[i]表示link的原点、m_obs_pose[j]表示第几个最近点
 void ApfLocalPlanner::getObstacleDistance()
 {
     getLinkPose();
     m_obs_distance.clear();
     m_obs_distance.resize(m_link_name.size());
-    for (size_t i = 0; i < m_link_name.size(); ++i)
-    {
-        m_obs_distance[i].resize(m_obs_pose.size());
+   
+        for (size_t i = 0; i < m_link_name.size(); ++i)
+       {
+         m_obs_distance[i].resize(m_obs_pose.size());
         for (size_t j = 0; j < m_obs_pose.size(); ++j)
         {
             m_obs_distance[i][j] = getDistance(m_link_pose_vec[i], m_obs_pose[j]);
@@ -212,6 +256,7 @@ void ApfLocalPlanner::getObstacleDistance()
     }
 }
 
+//把geometry_msgs::PoseStamped转换成vector<double>
 inline void ApfLocalPlanner::fill(const geometry_msgs::PoseStamped &pose, std::vector<double> &positin)
 {
     positin.resize(3);
@@ -222,86 +267,110 @@ inline void ApfLocalPlanner::fill(const geometry_msgs::PoseStamped &pose, std::v
 
 int ApfLocalPlanner::getJointForce()
 {
-    m_joint_att_trajectory_p.fill(0);
+    m_joint_att_trajectory_p.fill(0); //轨迹跟随 / 目标跟随
     m_joint_att_trajectory_w.fill(0);
     m_joint_att_force_w.fill(0);
     m_joint_att_force_p.fill(0);
     m_joint_rep_force.fill(0);
     m_all_force.fill(0);
-    // 全局的轨迹跟随器
+
+    //局部轨迹跟随器
     if (getTrajectoryForce() != 0)
     {
-        // 目标跟随器，只有当全局轨迹跟随器找不到适合的轨迹点才会生效
+        //获取目标跟随器的力
         getTargetPoseForce();
     }
-    // 障碍物的斥力
+
+    //获取障碍物排斥速度                 斥力
     getObstacleForce();
-    // 前面获取的力的合成
-    m_all_force = m_joint_att_trajectory_p * m_apf->tra_alfa + m_joint_att_trajectory_w * m_apf->tra_alfa_rot + m_joint_att_force_p * m_apf->target_alfa + m_joint_att_force_w * m_apf->target_alfa_rot + m_joint_rep_force;
+
+    //_alfa 对由末端位置速度转换得到的关节得到数值乘以的比例
+    //_alfa_rot对由末端姿态速度转换得到的关节得到数值乘以的比例
+    //合成
+    m_all_force = m_joint_att_trajectory_p * m_apf->tra_alfa                                                  //tra_alfa=1.2     0.6
+                  + m_joint_att_trajectory_w * m_apf->tra_alfa_rot + m_joint_att_force_p * m_apf->target_alfa //target_alfa=10   5
+                  + m_joint_att_force_w * m_apf->target_alfa_rot + 2 * m_joint_rep_force;
 }
 
+//获取局部轨迹跟随器的力
 int ApfLocalPlanner::getTrajectoryForce()
 {
-    // 从全局轨迹中选取符合跟随器的点，如果符合返回true，如果机器人震荡，和这个函数有较大的关系
-    if (getNearbyPoint())
+    //从全局轨迹中选取符合跟随器的点，如果符合返回true，如果机器人震荡，跟这个函数有关
+    if (getNearbyPoint()) //哪个最近点
     {
         Eigen::Vector3d euler_err;
         double position_err;
-        // 获取位置误差和姿态误差
-        getOrienError(m_current_target_link_pose, (*m_tcp_trajectory_iter), euler_err);
-        position_err = finishPosition(m_current_target_link_pose, (*m_tcp_trajectory_iter));
+        // Eigen::Vector3d euler_err1;
 
-        // 人工势场法
+        //姿态误差
+        getOrienError(m_current_target_link_pose, (*m_tcp_trajectory_iter), euler_err);
+
+        //位置误差
+        position_err = finishPosition(m_current_target_link_pose, (*m_tcp_trajectory_iter));
+        euler_err = getOrienError(m_current_target_link_pose, (*m_tcp_trajectory_iter)); ////
+
+        //计算位置和姿态误差
+        //人工势场法
         Eigen::Matrix<double, 3, 1> err_p = Eigen::Matrix<double, 3, 1>::Identity();
         Eigen::Matrix<double, 3, 1> err_w = Eigen::Matrix<double, 3, 1>::Identity();
         for (int i = 0; i < 3; ++i)
         {
-            // 后面乘以误差的倒数，是为了自适应，建议调整公式
-            err_p(i, 0) = -m_apf->tra_dist_att * m_apf->trajectory_zeta * (m_current_p(i, 0) - (*m_tcp_trajectory_iter)(i, 3)) * (1 / pow(abs(position_err), 2));
-            err_w(i, 0) = m_apf->tra_dist_att_config * m_apf->trajectory_zeta * euler_err(i) * (1 / abs(euler_err.sum()));
+            //后面乘以误差的倒数是为了自适应，建议调整公式
+            err_p(i, 0) = -m_apf->tra_dist_att * m_apf->trajectory_zeta *
+                          (m_current_p(i, 0) - (*m_tcp_trajectory_iter)(i, 3)) * (1 / abs(position_err)); //1.2*1*(  -  )* (1/())
+
+            //err_w(i, 0) = m_apf->tra_dist_att_config * m_apf->trajectory_zeta * euler_err(i) * (1 / abs(euler_err.sum()));
+            //0.5*1* R/P/Y /
         }
-        // 利用速度转移矩阵将pick_link的速度转移到link6
-        Eigen::MatrixXd link_volecity_v = m_volecity_transform.block<6, 3>(0, 0) * err_p;
-        Eigen::MatrixXd link_volecity_w = m_volecity_transform.block<6, 3>(0, 3) * err_w;
-        // 利用jacobian矩阵将末端速度转化为角速度
+
+        //利用速度转移矩阵将pick_link的速度转移到link6
+        Eigen::MatrixXd link_volecity_v = m_volecity_transform.block<6, 3>(0, 0) * err_p; //         [6x3] [3x1] = 6x1
+        Eigen::MatrixXd link_volecity_w = m_volecity_transform.block<6, 3>(0, 3) * err_w; //         [6x3] [3x1] = 6x1
+
+        //Eigen::MatrixXd link_volecity_v = m_volecity_transform.block<3, 3>(0, 0) * err_p                   //    [3x3][3x1]+ [3x3][3x1]=[3x1]
+        //                                                         +  m_volecity_transform.block<3, 3>(0, 3) * err_w;
+        //Eigen::MatrixXd link_volecity_w = m_volecity_transform.block<3, 3>(3, 3) * err_w;                 //    [3x3][3x1]+ [3x3][3x1]=[3x1]
+
+        //用雅可比矩阵将末端速度转化为？
         m_joint_att_trajectory_p = m_all_jacobian[m_link_name.size() - 2] * link_volecity_v;
-        // m_joint_att_trajectory_w = m_all_jacobian[m_link_name.size() - 2] * link_volecity_w;
-        return 0;
+        //m_joint_att_trajectory_w = m_all_jacobian[m_link_name.size() - 2] * link_volecity_w;
+        return 0; //执行成功
     }
-    return -1;
+    return -1; //规划失败
 }
 
-bool ApfLocalPlanner::getNearbyPoint()
+bool ApfLocalPlanner::getNearbyPoint() //判断最近点
 {
-    static int cnt = 0;
+    static int cnt = 0; //计量有障碍物在附近的点的逼近次数
     bool flag = false;
-    std::list<Eigen::Isometry3d>::iterator iter = m_tcp_trajectory_iter;
-    int index = m_trajectory_point_index;
+    std::list<Eigen::Isometry3d>::iterator iter = m_tcp_trajectory_iter; //？
+    int index = m_trajectory_point_index;                                //？
     geometry_msgs::PoseStamped current_pose;
     m_move_group->setStartStateToCurrentState();
     current_pose = m_move_group->getCurrentPose(m_eef);
     int iter_push_index = 2000;
 
-    // 选取轨迹点的方法
-    // 选择在global_trajectory_att_outer
-    // 和global_trajectory_att_inner范围的点，
-    // 如果范围太小，速度太大，则会造成震荡
-    // 如果这个附近有障碍物，则减少对这个点的迭代次数
+    //选取轨迹点的方法
+    //选择环中的点，如果环太小，速度太大，会造成震荡
+    //如果附近有障碍物，则减少对这个点的迭代次数
+    //判断不是末位
     for (; iter != m_tcp_trajectory.end(); ++iter)
     {
-        double dis = getDistance(current_pose, (*iter));
+        double dis = getDistance(current_pose, (*iter)); // Eigen::Isometry3d
+
+        //距离在环内
         if (dis > m_apf->global_trajectory_att_inner && dis < m_apf->global_trajectory_att_outer)
         {
-            if (m_tcp_trajectory_iter == iter)
+            if (m_tcp_trajectory_iter == iter) //？
             {
                 ++cnt;
                 for (size_t i = 0; i < m_obs_pose.size(); i++)
                 {
-                    double dis_obs = getDistance((*iter), m_obs_pose[i]);
+                    double dis_obs = getDistance((*iter), m_obs_pose[i]); //
                     if (dis_obs < 0.05)
                     {
-                        iter_push_index = 300;
-                        break;
+                        iter_push_index = 300; //300？
+                        break;                 //跳出for循环？
                     }
                 }
                 if (cnt >= iter_push_index)
@@ -313,13 +382,13 @@ bool ApfLocalPlanner::getNearbyPoint()
                     {
                         setTrajectoryIndex(index, iter);
                         flag = false;
-                        break;
+                        break; //
                     }
                     ROS_INFO_STREAM("trajectory_point(cnt): " << index);
                 }
                 setTrajectoryIndex(index, iter);
                 flag = true;
-                break;
+                break; //
             }
             setTrajectoryIndex(index, iter);
             cnt = 0;
@@ -340,78 +409,149 @@ bool ApfLocalPlanner::getNearbyPoint()
     return flag;
 }
 
+//设置轨迹索引
 void ApfLocalPlanner::setTrajectoryIndex(int index, std::list<Eigen::Isometry3d>::iterator &iter)
 {
     m_tcp_trajectory_iter = iter;
     m_trajectory_point_index = index;
 }
 
+//目标跟随器的力
 int ApfLocalPlanner::getTargetPoseForce()
 {
-
+    // Eigen::Vector3d euler_err1;
     Eigen::Vector3d euler_err;
     double position_err;
-    // 获取误差
-    getOrienError(m_current_target_link_pose, m_target_pose_e, euler_err);
+
+    getOrienError(m_current_target_link_pose, m_target_pose_e, euler_err); //
+    //euler_err = getOrienError(m_current_target_link_pose, m_target_pose_e);   ////
     position_err = finishPosition(m_current_target_link_pose, (*m_tcp_trajectory_iter));
+
+    
+
+
+        static Eigen::Vector3d bubian ;
+
+    static int j = 0;
+    if (j== 0)
+    {
+        bubian = euler_err;
+        j++;
+       // j=0;
+    }
+
+
     Eigen::Matrix<double, 3, 1> err_p;
     Eigen::Matrix<double, 3, 1> err_w;
-    // 人工势场
-    for (int i = 0; i < 3; ++i)
+
+    double CC = sqrt(pow(euler_err(0), 2) + pow(euler_err(1), 2) + pow(euler_err(2), 2));
+    double cc = abs(pow(euler_err(0), 1 / 3) + pow(euler_err(1), 1 / 3) + pow(euler_err(2), 1 / 3));
+
+    //人工势场法
+    for (int i = 0; i < 3; ++i) //   for (int i = 2; i >-1;--i)     //
     {
-        err_p(i, 0) = -m_apf->dist_att * m_apf->target_zeta * (m_current_p(i, 0) - m_target_pose_e(i, 3)) * (1 / abs(position_err));
-        err_w(i, 0) = m_apf->dist_att_config * m_apf->target_zeta * euler_err(i) * (1 / abs(euler_err.sum()));
+        err_p(i, 0) = -m_apf->dist_att * m_apf->target_zeta *
+                      (m_current_p(i, 0) - m_target_pose_e(i, 3)) * (1 / abs(position_err));
+
+/*          if (euler_err(i) < 0.5)
+            err_w(i, 0) = 0;
+        else */
+            //err_w(i, 0) = -0.2 * euler_err(i);
+  
+
+           int  n = 40;
+           if(euler_err(i)>2 || euler_err(i)<-2)
+                     err_w(i, 0) = -1.2*euler_err(i); 
+            else if(1<euler_err(i)<=2 || -2<=euler_err(i)<-1)
+                     err_w(i, 0) = 0.9*euler_err(i);    // -2*euler_err(i)/abs(euler_err(i)) ;
+            else  if(0.1<=euler_err(i)<=1 || -1<=euler_err(i)<=-0.1)
+                     err_w(i, 0) = 0.9* (euler_err(i));
+            else  if(0.03<=euler_err(i)<0.1)
+                     err_w(i, 0) =0.9* (euler_err(i));
+            else  if(-0.1<euler_err(i)<=-0.03)
+                     err_w(i, 0) = n* (euler_err(i));  //
+            else  if(0.01<=euler_err(i)<0.03)
+                     err_w(i, 0) = n* (euler_err(i));
+            else  if(-0.03<euler_err(i)<-0.01)
+                     err_w(i, 0) = n* (euler_err(i));      
+            else  err_w(i, 0) =0;    
+           
+
+        cout << " 相差角度：" << euler_err(i) << endl;
+        //cout << "   bubian：" << bubian(i) << endl;
+        // err_w(i, 0) = m_apf->dist_att_config * m_apf->target_zeta *euler_err(i) * (1 / abs(euler_err.sum()));
     }
-    // 速度转移矩阵
-    Eigen::MatrixXd link_volecity_v = m_volecity_transform.block<6, 3>(0, 0) * err_p;
-    Eigen::MatrixXd link_volecity_w = m_volecity_transform.block<6, 3>(0, 3) * err_w;
-    // jacobian
+    //err_w = -0.1*bubian;
+    // Eigen::MatrixXd link_volecity_v = m_volecity_transform.block<6, 3>(0, 0) * err_p;                        //pick_link 转 link6
+    //Eigen::MatrixXd link_volecity_w = m_volecity_transform.block<6, 3>(0, 3) * err_w;
+
+    Eigen::Matrix<double, 6, 3> T_v;
+    Eigen::MatrixXd T_vw = m_volecity_transform.block<3, 3>(0, 3);
+    T_v << T_vw, Eigen::Matrix3d::Zero();
+    Eigen::MatrixXd link_volecity_v = m_volecity_transform.block<6, 3>(0, 0) * err_p + T_v * err_w; //[6x3][3x1]+ [6x3][3x1]=[6x1]
+
+    Eigen::Matrix<double, 6, 3> T_w = (m_volecity_transform.block<3, 6>(3, 0)).transpose();
+    Eigen::MatrixXd link_volecity_w = T_w * err_w;             //    [6x3][3x1]+ [6x3][3x1]=[6x1]
+
     m_joint_att_force_p = m_all_jacobian[m_link_name.size() - 2] * link_volecity_v;
-    // m_joint_att_force_w = m_all_jacobian[m_link_name.size() - 2] * link_volecity_w;
+    //m_joint_att_force_w = m_all_jacobian[m_link_name.size() - 2] * link_volecity_w; // 需要调试？
 
     return 0;
 }
 
+//获取排斥速度
 int ApfLocalPlanner::getObstacleForce()
 {
+    /*     static int i = 0;
+    if (i == 0)
+    {
+        // ...
+        i++;
+        i=0;
+    } */
     std::vector<std::vector<Eigen::Matrix<double, 6, 1>>> joint_rep_force;
     std::vector<std::vector<Eigen::Matrix<double, 3, 1>>> obs_rep;
     joint_rep_force.resize(m_link_name.size());
     obs_rep.resize(m_link_name.size());
-    // getObstacleDistance();
-    for (int i = 0; i < m_link_name.size(); ++i)
+
+    //getObstacleDistance();
+
+    for (int i = 0; i < m_link_name.size(); ++i) //遍历link
     {
         joint_rep_force[i].resize(m_obs_pose.size());
         obs_rep[i].resize(m_obs_pose.size());
-        for (size_t j = 0; j < m_obs_pose.size(); ++j)
+        for (size_t j = 0; j < m_obs_pose.size(); ++j) //遍历障碍物点
         {
             joint_rep_force[i][j].fill(0);
             obs_rep[i][j].fill(0);
-            // 不在范围内的障碍物忽略
+
+            //距离大于安全距离，斥力为零
+            //先给障碍物斥力赋值，再传到关节上
             if (m_obs_distance[i][j] > m_apf->safety_distance)
             {
                 obs_rep[i][j] << 0, 0, 0;
-                continue;
+                continue; //跳过j这个点
             }
-            // 人工势场法
             for (int k = 0; k < 3; ++k)
             {
-                double dis = m_current_p(k, 0) - m_obs_pose[j][k];
-                obs_rep[i][j](k, 0) = m_apf->obs_eta[i] * (1 / m_obs_distance[i][j] - 1 / m_apf->safety_distance) * (1 / (m_obs_distance[i][j] * m_obs_distance[i][j])) * (dis / m_obs_distance[i][j]);
-                // 逃脱局部最小值
-                obs_rep[i][j](k, 0) = obs_rep[i][j](k, 0) * getRandon(1.3, 1.8);
+                double dis = m_current_p(k, 0) - m_obs_pose[j][k]; //第j个vector  第k个元素
+                obs_rep[i][j](k, 0) = m_apf->obs_eta[i] * (1 / m_obs_distance[i][j] - 1 / m_apf->safety_distance) *
+                                      (1 / (m_obs_distance[i][j] * m_obs_distance[i][j])) * (dis / m_obs_distance[i][j]);
+                obs_rep[i][j](k, 0) = obs_rep[i][j](k, 0) * getRandon(2.0, 3.0); //防止陷入局部极小值      改    (1.3, 1.8)
             }
-            // 利用jacobian矩阵将每一个连杆的速度转移到关节上
             joint_rep_force[i][j] = m_jacobian_p[i] * obs_rep[i][j];
-            // 取比例
+            //笛卡尔空间转关节空间    [6x3]  [3x1] =[6x1]
+
             joint_rep_force[i][j] *= m_apf->obs_alfa[i];
-            // 全部障碍物的斥力速度合成在一起
-            m_joint_rep_force += joint_rep_force[i][j];
+
+            //关节的斥力和   排斥速度
+            m_joint_rep_force += joint_rep_force[i][j]; //在关节空间斥力相加
         }
     }
     return 0;
 }
 
+//m_link_pose_vec[i]       获取6个link的原点坐标
 int ApfLocalPlanner::getLinkPose()
 {
     m_move_group->setStartStateToCurrentState();
@@ -419,17 +559,103 @@ int ApfLocalPlanner::getLinkPose()
     m_link_pose_vec.resize(m_link_name.size());
     for (size_t i = 0; i < m_link_name.size(); i++)
     {
-        m_link_pose_vec[i] = m_move_group->getCurrentPose(m_link_name[i]);
+        m_link_pose_vec[i] = m_move_group->getCurrentPose(m_link_name[i]); //
     }
     return 0;
 }
 
+//两个 getOrienError   &回传
 void ApfLocalPlanner::getOrienError(const geometry_msgs::PoseStamped &pc, const Eigen::Isometry3d &pt, Eigen::Vector3d &euler_angle)
 {
     Eigen::Quaterniond q1c(pc.pose.orientation.w, pc.pose.orientation.x, pc.pose.orientation.y, pc.pose.orientation.z);
     Eigen::Quaterniond q2t(pt.rotation());
-    Eigen::Quaterniond e_q = q1c.conjugate() * q2t;
-    euler_angle = e_q.matrix().eulerAngles(0, 1, 2);
+    
+    double x=q2t.x(), y=q2t.y(), z=q2t.z(), w=q2t.w();
+	double Roll  = atan2(2 * (w * z + x * y) , 1 - 2 * (z * z + x * x));
+	double Pitch = asin(CLAMP(2 * (w * x - y * z) , -1.0f , 1.0f));
+	double Yaw   = atan2(2 * (w * y + z * x) , 1 - 2 * (x * x + y * y));
+    
+    double x2=pc.pose.orientation.x, y2=pc.pose.orientation.y, z2=pc.pose.orientation.z, w2=pc.pose.orientation.w;
+	double Roll2  = atan2(2 * (w2 * z2 + x2 * y2) , 1 - 2 * (z2 * z2 + x2 * x2));
+	double Pitch2 = asin(CLAMP(2 * (w2 * x2 - y2 * z2) , -1.0f , 1.0f));
+	double Yaw2   = atan2(2 * (w2 * y2 + z2* x2) , 1 - 2 * (x2 * x2 + y2 * y2));
+    Eigen::Vector3d mu_biao2 = pt.rotation().eulerAngles(0,1,2);
+    Eigen::Vector3d mu_biao = q2t.toRotationMatrix().eulerAngles(0,1,2);
+    Eigen::Vector3d dang_qian = q1c.toRotationMatrix().eulerAngles(0,1,2);
+
+    cout << "当前欧拉角：" << dang_qian(0) << "  " << dang_qian(1) << "  " << dang_qian(2) << endl;  //
+    cout << "当前欧拉角2：" << Roll2<< "  " << Pitch2<< "  " << Yaw2 << endl;                               //自己写
+    cout << "目标欧拉角：" << mu_biao(0) << "  " << mu_biao(1) << "  " << mu_biao(2) << endl;
+    cout << "目标欧拉角2：" << mu_biao2(0) << "  " << mu_biao2(1) << "  " << mu_biao2(2) << endl;
+    cout << "目标欧拉角3：" << Roll<< "  " << Pitch<< "  " << Yaw << endl;                    //自己写
+    double angular_distance = q1c.angularDistance(q2t);
+    cout << "current: " << pc.pose.orientation << endl;
+    cout << "target: " << q2t.x() << " " << q2t.y() << " " << q2t.z() << " " << q2t.w() << " " << endl;
+    cout << "偏差角1：   " << angular_distance << endl;
+
+
+    Eigen::Quaterniond e_q = q1c.conjugate() * q2t;           //共轭
+    //共轭表示旋转轴不变，旋转角相反， (w,-x,-y,-z)
+
+    //euler_angle = e_q.matrix().eulerAngles(0, 1, 2);              //可能会有问题？
+        double xx= e_q.x(),  yy=e_q.y(),  zz=e_q.z(),  ww=e_q.w();
+        double Roll3  = atan2(2 * (ww * zz + xx * yy) , 1 - 2 * (zz * zz + xx * xx));
+	    double Pitch3 = asin(CLAMP(2 * (ww * xx - yy * zz) , -1.0f , 1.0f));
+	    double Yaw3   = atan2(2 * (ww * yy + zz * xx) , 1 - 2 * (xx * xx + yy * yy));
+         euler_angle = {Roll3, Pitch3, Yaw3};
+
+    //四元数球面线性插值
+    double i = 2, n = 9;
+
+    double t = i / n;
+    double omiga = acos(q1c.dot(q2t));
+    cout << "偏差角2：   " << omiga << endl;
+    double k0 = sin((1 - t) * omiga) / sin(omiga);
+    double k1 = sin(t * omiga) / sin(omiga);
+
+    double kk0 = 1 - t;
+    double kk1 = t;
+/*
+     //Eigen::Quaterniond  ct;
+    if (omiga >= 0.1)
+    {
+        if (q1c.dot(q2t) >= 0.0f)
+        {
+            Eigen::Quaterniond ct(q1c.w() * k0 + q2t.w() * k1, q1c.x() * k0 + q2t.x() * k1, q1c.y() * k0 + q2t.y() * k1, q1c.z() * k0 + q2t.z() * k1);
+            double xx= ct.x(),yy=ct.y(),zz=ct.z(),ww=ct.w();
+            double Roll  = atan2(2 * (ww * zz + xx * yy) , 1 - 2 * (zz * zz + xx * xx));
+	        double Pitch = asin(CLAMP(2 * (ww * xx - yy * zz) , -1.0f , 1.0f));
+	        double Yaw   = atan2(2 * (ww * yy + zz * xx) , 1 - 2 * (xx * xx + yy * yy));
+            euler_angle = {Roll, Pitch,Yaw};
+        }
+
+        else if (q1c.dot(q2t) < 0.0f)
+        {
+            Eigen::Quaterniond ct(q1c.w() * k0 - q2t.w() * k1, q1c.x() * k0 - q2t.x() * k1, q1c.y() * k0 - q2t.y() * k1, q1c.z() * k0 - q2t.z() * k1);
+            //euler_angle = ct.toRotationMatrix().eulerAngles(0, 1, 2);
+            double xx= ct.x(),yy=ct.y(),zz=ct.z(),ww=ct.w();
+            double Roll  = atan2(2 * (ww * zz + xx * yy) , 1 - 2 * (zz * zz + xx * xx));
+	        double Pitch = asin(CLAMP(2 * (ww * xx - yy * zz) , -1.0f , 1.0f));
+	        double Yaw   = atan2(2 * (ww * yy + zz * xx) , 1 - 2 * (xx * xx + yy * yy));
+            euler_angle = {Roll, Pitch,Yaw};
+        }
+    }
+    else if (0.1 < omiga )
+    {
+        Eigen::Quaterniond ct(q1c.w() * kk0 + q2t.w() * kk1, q1c.x() * kk0 + q2t.x() * kk1, q1c.y() * kk0 + q2t.y() * kk1, q1c.z() * kk0 + q2t.z() * kk1);
+        cout << q1c.w() * kk0 + q2t.w() * kk1 << endl;
+        //Eigen::Quaterniond ct(q1c.w()* kk0 - q2t.w()*kk1,     q1c.x()*kk0 - q2t.x()*kk1,    q1c.y()*kk0 - q2t.y()*kk1,    q1c.z()* kk0  - q2t.z()*kk1);
+        //euler_angle = ct.toRotationMatrix().eulerAngles(0, 1, 2);
+            double xx= ct.x(),yy=ct.y(),zz=ct.z(),ww=ct.w();
+            double Roll  = atan2(2 * (ww * zz + xx * yy) , 1 - 2 * (zz * zz + xx * xx));
+	        double Pitch = asin(CLAMP(2 * (ww * xx - yy * zz) , -1.0f , 1.0f));
+	        double Yaw   = atan2(2 * (ww * yy + zz * xx) , 1 - 2 * (xx * xx + yy * yy));
+            euler_angle = {Roll, Pitch,Yaw};
+    } */
+
+
+    //else
+        //euler_angle = {0, 0, 0}; 
 
     // if ((abs(euler_angle(0)) +abs(euler_angle(1)) + abs(euler_angle(2))) > M_PI / 2 * 3)
     // {
@@ -442,17 +668,19 @@ void ApfLocalPlanner::getOrienError(const geometry_msgs::PoseStamped &pc, const 
     //     }
     // }
     // ROS_INFO_STREAM("euler1: " << euler_angle);
-    double e = q1c.angularDistance(q2t);
+    //double e = q1c.angularDistance(q2t);         //e？
 }
+
+
 
 Eigen::Vector3d ApfLocalPlanner::getOrienError(const geometry_msgs::PoseStamped &p, const Eigen::Isometry3d &p2)
 {
     Eigen::Quaterniond q1c(p.pose.orientation.w, p.pose.orientation.x, p.pose.orientation.y, p.pose.orientation.z);
-    Eigen::Vector3d ec = q1c.matrix().eulerAngles(0, 1, 2);
-    Eigen::Vector3d et = p2.rotation().eulerAngles(0, 1, 2);
+    Eigen::Vector3d ec = q1c.matrix().eulerAngles(0, 1, 2);  //四元数转欧拉角   012表示 RPY 顺序
+    Eigen::Vector3d et = p2.rotation().eulerAngles(0, 1, 2); //旋转矩阵转欧拉角
     m_move_group->setStartStateToCurrentState();
-    std::vector<double> rpy = m_move_group->getCurrentRPY(m_eef);
-    Eigen::Vector3d err = ec - et;
+    std::vector<double> rpy = m_move_group->getCurrentRPY(m_eef); //？？
+    Eigen::Vector3d err = ec - et;                                //当前-目标
     return err;
 }
 
@@ -460,10 +688,31 @@ double ApfLocalPlanner::finishPosition(const geometry_msgs::PoseStamped &s, cons
 {
     Eigen::Matrix<double, 3, 1> current_position;
     current_position << s.pose.position.x, s.pose.position.y, s.pose.position.z;
-    Eigen::Matrix<double, 3, 1> target_position;
+
+    cout << "当前位置点：" << s.pose.position.x << "  " << s.pose.position.y << "  " << s.pose.position.z << endl;
+    
+    Array[num][0] = s.pose.position.x;
+    Array[num][1] = s.pose.position.y;
+    Array[num][2] = s.pose.position.z;
+    num ++;
+    
+    ofstream ofile;
+    ofile.open("/home/fshs/catkin_ws/avoid_first.txt",ios::out | ios::trunc);
+
+    for(int i=0; i<num; i++)						// 写入数据
+	    {
+	         ofile << Array[i][0]<< "," <<  Array[i][1] << "," <<Array[i][2] << endl;
+             //ofile<<std::endl;
+             //fprintf(fp, "%f,%f,%f\n",  Array[i][0], Array[i][1], Array[i][2]);
+	    }          
+    ofile.close();
+
+   
+    Eigen::Matrix<double, 3, 1> target_position; 
     target_position << t(0, 3), t(1, 3), t(2, 3);
+    cout << "目标位置点：" << t(0, 3) << "  " << t(1, 3) << "  " << t(2, 3) << endl;
     Eigen::Matrix<double, 3, 1> err = current_position - target_position;
-    double err_norm = err.norm();
+    double err_norm = err.norm(); //二范数   元素模的平方和开根号
     return err_norm;
 }
 
@@ -475,8 +724,8 @@ double ApfLocalPlanner::finishOrien(const geometry_msgs::PoseStamped &s, const E
     // double err_sum = err.sum();
     // return abs(err_sum);
     Eigen::Quaterniond q1c(s.pose.orientation.w, s.pose.orientation.x, s.pose.orientation.y, s.pose.orientation.z);
-    Eigen::Quaterniond q2t(t.rotation());
-    Eigen::Quaterniond e_q = q2t * q1c.inverse();
+    Eigen::Quaterniond q2t(t.rotation());         //使用旋转矩阵来对四元數进行初始化
+    Eigen::Quaterniond e_q = q2t * q1c.inverse(); //求逆
     double e = q1c.angularDistance(q2t);
     return e;
 }
@@ -486,6 +735,7 @@ void ApfLocalPlanner::JointStateCB(const sensor_msgs::JointStateConstPtr &msg)
     m_current_joint_value = msg->position;
 }
 
+//关节角总误差
 double ApfLocalPlanner::finishJoint(std::vector<double> current_joint, std::vector<double> target_joint)
 {
     double sum = 0;
@@ -499,54 +749,63 @@ double ApfLocalPlanner::finishJoint(std::vector<double> current_joint, std::vect
 
 void ApfLocalPlanner::setParam()
 {
-    m_nh->param<int>("max_iter", m_apf->max_iter, 5000);
-    m_nh->param<double>("safety_distance", m_apf->safety_distance, 0.30);
+    m_nh->param<int>("max_iter", m_apf->max_iter, 10000);
+    m_nh->param<double>("safety_distance", m_apf->safety_distance, 0.3);
 
-    m_nh->param<double>("target_zeta", m_apf->target_zeta, 0.1);
-    m_nh->param<double>("target_alfa", m_apf->target_alfa, 0.5);
-    m_nh->param<double>("target_alfa_rot", m_apf->target_alfa_rot, 0.004);
-    m_nh->param<double>("dist_att", m_apf->dist_att, 0.01);
-    m_nh->param<double>("dist_att_config", m_apf->dist_att_config, 0.01);
+    m_nh->param<double>("target_zeta", m_apf->target_zeta, 0.1);           //1
+    m_nh->param<double>("target_alfa", m_apf->target_alfa, 0.5);           //10
+    m_nh->param<double>("target_alfa_rot", m_apf->target_alfa_rot, 0.004); //0.5
+    m_nh->param<double>("dist_att", m_apf->dist_att, 0.01);                //10
+    m_nh->param<double>("dist_att_config", m_apf->dist_att_config, 0.01);  //0.5
 
-    m_nh->param<double>("trajectory_zeta", m_apf->trajectory_zeta, 0.1);
-    m_nh->param<double>("tra_alfa", m_apf->tra_alfa, 0.5);
-    m_nh->param<double>("tra_alfa_rot", m_apf->tra_alfa_rot, 0.004);
-    m_nh->param<double>("tra_dist_att", m_apf->tra_dist_att, 0.01);
-    m_nh->param<double>("tra_dist_att_config", m_apf->tra_dist_att_config, 0.01);
+    m_nh->param<double>("trajectory_zeta", m_apf->trajectory_zeta, 0.1);          //1
+    m_nh->param<double>("tra_alfa", m_apf->tra_alfa, 0.5);                        //1.2
+    m_nh->param<double>("tra_alfa_rot", m_apf->tra_alfa_rot, 0.004);              //0.5
+    m_nh->param<double>("tra_dist_att", m_apf->tra_dist_att, 0.01);               //1.2
+    m_nh->param<double>("tra_dist_att_config", m_apf->tra_dist_att_config, 0.01); //0.5
 
     m_nh->param<double>("global_trajectory_att_outer", m_apf->global_trajectory_att_outer, 0.30);
-    m_nh->param<double>("global_trajectory_att_inner", m_apf->global_trajectory_att_inner, 0.02);
+    m_nh->param<double>("global_trajectory_att_inner", m_apf->global_trajectory_att_inner, 0.08);
 
-    m_nh->param<double>("target_err", m_apf->target_err, 0.02);
-    m_nh->param<double>("target_err_ori", m_apf->target_err_ori, 0.025);
+    m_nh->param<double>("target_err", m_apf->target_err, 0.02); //0.02
+    m_nh->param<double>("target_err_ori", m_apf->target_err_ori, 0.0174444444);
 
-    vector<double> obs_eta{0.1, 0.1, 0.1, 0.1, 0.1, 0.1};
+    vector<double> obs_eta{0.1, 0.1, 0.1, 0.1, 0.1, 0.1}; //0.5
     // vector<double> obs_rep{0.03, 0.03, 0.03, 0.03, 0.03, 0.03};
-    vector<double> obs_alfa{0.5, 0.5, 0.5, 0.5, 0.5, 0.5};
+    vector<double> obs_alfa{0.5, 0.5, 0.5, 0.5, 0.5, 0.5}; //0.01
 
     m_nh->param<vector<double>>("obs_eta", m_apf->obs_eta, obs_eta);
     // m_nh->param<vector<double>>("obs_rep", m_apf->obs_rep, obs_rep);
     m_nh->param<vector<double>>("obs_alfa", m_apf->obs_alfa, obs_alfa);
 }
 
+//构造速度变换矩阵     对什么对象做转换取决于T的参数           书本P111
+//link6的速度转至pick_link
 void ApfLocalPlanner::tr2jac(const Eigen::Isometry3d &T)
 {
-    Eigen::Matrix3d R_inv = T.rotation().inverse();
+    Eigen::Matrix3d R_inv = T.rotation().inverse(); //T的旋转矩阵部分求逆
     Eigen::Matrix3d t;
     t << 0, -T.translation()(2), T.translation()(1),
         T.translation()(2), 0, -T.translation()(0),
-        -T.translation()(1), T.translation()(0), 0;
+        -T.translation()(1), T.translation()(0), 0; // T.translation()表示T的平移矩阵   t=[0, -pz, py, pz, 0, px, -py, px, 0]
     Eigen::Matrix3d t2 = -R_inv * t;
-    Eigen::Matrix<double, 6, 6> Tv;
+    Eigen::Matrix<double, 6, 6> Tv; //6x6速度变换矩阵
     Tv << R_inv, t2, Eigen::Matrix3d::Zero(), R_inv;
-    m_volecity_transform = Tv;
+    m_volecity_transform = Tv; // 速度变换矩阵（6x6）
 }
 
 Eigen::Isometry3d ApfLocalPlanner::getTransform(const std::string &target_link, const std::string &source_link)
 {
-    tf::TransformListener listenter;
-    tf::StampedTransform transform;
-    listenter.waitForTransform(target_link, source_link, ros::Time(0), ros::Duration(3));
+    tf::TransformListener listenter; //定义监听器；
+
+    //tf::StampedTransform是ros里代表TF变换的数据类型,一般在机器人上
+    //读取雷达坐标系到机器人坐标系的信息就是通过读取tf信息.
+    tf::StampedTransform transform; //定义存放变换关系的变量
+
+    //waitForTransform() 函数来等待 tf 的坐标转换线程得到你想要的时间点的坐标转换数据。
+    //简单的说：waitForTransform() 就是一个安全程序。
+    //监听两个坐标系之间的变换
+    listenter.waitForTransform(target_link, source_link, ros::Time(0), ros::Duration(3)); //？
     try
     {
         listenter.lookupTransform(target_link, source_link, ros::Time(0), transform);
@@ -556,20 +815,27 @@ Eigen::Isometry3d ApfLocalPlanner::getTransform(const std::string &target_link, 
         std::cerr << e.what() << '\n';
         exit(-1);
     }
+
     Eigen::Isometry3d t;
     tf::Quaternion tf_q = transform.getRotation();
+
+    //Eigen中四元数Quaterniond的初始的方法
+    //Eigen::Quaterniond q1(w, x, y, z);// 第一种方式，这里用的是这种
+    //Eigen::Quaterniond q2(Vector4d(x, y, z, w));// 第二种方式
+    //Eigen::Quaterniond q2(Matrix3d(R));// 第三种方式
     Eigen::Quaterniond q(tf_q.getW(), tf_q.getX(), tf_q.getY(), tf_q.getZ());
-    t.prerotate(q);
-    tf::Vector3 ori = transform.getOrigin();
+    t.prerotate(q);                          //四元数转旋转矩阵
+    tf::Vector3 ori = transform.getOrigin(); //transform.getOrigin().x()
     Eigen::Vector3d trans(ori.getX(), ori.getY(), ori.getZ());
     t.pretranslate(trans);
     return t;
 }
 
+//获取随机数
 double ApfLocalPlanner::getRandon(double a, double b)
 {
-    std::random_device rd;  
-    std::mt19937 gen(rd()); 
+    std::random_device rd;
+    std::mt19937 gen(rd());
     std::uniform_real_distribution<> dis(a, b);
     double i = dis(gen);
     // ROS_INFO_STREAM("random" << i);

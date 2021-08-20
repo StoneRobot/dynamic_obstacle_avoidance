@@ -7,6 +7,10 @@ GlobalPlanner::GlobalPlanner(moveit::planning_interface::MoveGroupInterface *mov
     m_model = m_robot_state_ptr->getJointModelGroup(m_move_group->getName());
 }
 
+//析构函数(destructor) 与构造函数相反，当对象结束其生命周期，如对象所在的函数已调用完毕时，
+//系统自动执行析构函数。析构函数往往用来做“清理善后” 的工作（例如在建立对象时用new开辟
+//了一片内存空间，delete会自动调用析构函数后释放内存）。
+//析构函数，delete会自动调用析构函数释放内存
 GlobalPlanner::~GlobalPlanner()
 {
 }
@@ -15,19 +19,20 @@ void GlobalPlanner::setJointTarget(const std::vector<double> &joint)
 {
     m_move_group->setJointValueTarget(joint);
     m_eef = m_move_group->getEndEffectorLink();
+    ROS_INFO_STREAM("m_eef: >>>>>>>>>>>>>>>" << m_eef) ;
     FK(joint, m_target_pose_e);
 }
 
 void GlobalPlanner::setTargetPose(const geometry_msgs::PoseStamped &target_pose, const std::string &link_name)
 {
     m_move_group->setPoseTarget(target_pose, link_name);
-    Eigen::Isometry3d p = Eigen::Isometry3d::Identity();
+    Eigen::Isometry3d p = Eigen::Isometry3d::Identity(); //矩阵初始化
     Eigen::Matrix<double, 3, 1> t;
     t << target_pose.pose.position.x, target_pose.pose.position.y, target_pose.pose.position.z;
     Eigen::Quaterniond q(target_pose.pose.orientation.w, target_pose.pose.orientation.x, target_pose.pose.orientation.y, target_pose.pose.orientation.z);
     p.pretranslate(t);
     p.prerotate(q);
-    m_target_pose_e = p;
+    m_target_pose_e = p; // 4x4构造矩阵
     m_eef = link_name;
 }
 
@@ -44,18 +49,17 @@ bool GlobalPlanner::plan()
     return false;
 }
 
-void GlobalPlanner::getTargetPose(Eigen::Isometry3d& target_pose, std::string& link_name)
+void GlobalPlanner::getTargetPose(Eigen::Isometry3d &target_pose, std::string &link_name)
 {
     target_pose = m_target_pose_e;
     link_name = m_eef;
 }
 
-void GlobalPlanner::getTrajectory(moveit_msgs::RobotTrajectory& joint_tra, std::list<Eigen::Isometry3d>& tcp_tra)
+void GlobalPlanner::getTrajectory(moveit_msgs::RobotTrajectory &joint_tra, std::list<Eigen::Isometry3d> &tcp_tra)
 {
     joint_tra = m_tra;
     tcp_tra = m_tcp_trajecory;
 }
-
 
 void GlobalPlanner::FK(const std::vector<double> &joint, Eigen::Isometry3d &tcp)
 {
