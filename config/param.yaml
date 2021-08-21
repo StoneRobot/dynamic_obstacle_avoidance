@@ -15,7 +15,7 @@ target_zeta: 1
 
 # *_alfa 对由末端位置速度转换得到的关节得到数值乘以的比例
 # *_att 从那个  python工程    引入的参数，构型空间？大概类似坡度
-target_alfa: 5                       #10
+target_alfa: 15                       #10
 dist_att: 10
 target_alfa_rot: 0.5
 dist_att_config: 0.5
@@ -25,11 +25,11 @@ dist_att_config: 0.5
 target_err: 0.02
 
 # *_ori 指的是姿态  姿态总误差 finishOrien
-target_err_ori: 5.5                        #0.017444444
+target_err_ori: 0.0174444                        #0.017444444
 
 # 轨迹跟随器参数
 trajectory_zeta: 1.0  #增益
-tra_alfa: 0.6                 #对由末端位置速度转换得到的关节得到数值乘以的比例  1.2
+tra_alfa: 1.8                 #对由末端位置速度转换得到的关节得到数值乘以的比例  1.2
 tra_dist_att: 1.2
 
 tra_alfa_rot: 0.5          #对由末端姿态速度转换得到的关节得到数值乘以的比例
@@ -45,4 +45,4 @@ obs_eta: [0.5, 0.5, 0.5, 0.5, 0.5, 0.5]
 
 # obs_rep: [0.01, 0.01, 0.01, 0.01, 0.01, 0.01]
 # 对算出的速度取一个比例？
-obs_alfa: [0.01, 0.01, 0.01, 0.01, 0.01, 0.01]
+obs_alfa: [0.002, 0.002, 0.002, 0.002, 0.002, 0.002]

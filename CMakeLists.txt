@@ -11,7 +11,7 @@ find_package(catkin REQUIRED COMPONENTS
   message_generation
   moveit_core
   moveit_ros_planning_interface
-  # moveit_servo
+  moveit_servo
   roscpp
   std_msgs
 )

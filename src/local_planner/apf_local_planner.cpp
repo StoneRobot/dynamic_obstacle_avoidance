@@ -286,9 +286,15 @@ int ApfLocalPlanner::getJointForce()
     //_alfa 对由末端位置速度转换得到的关节得到数值乘以的比例
     //_alfa_rot对由末端姿态速度转换得到的关节得到数值乘以的比例
     //合成
-    m_all_force = m_joint_att_trajectory_p * m_apf->tra_alfa                                                  //tra_alfa=1.2     0.6
-                  + m_joint_att_trajectory_w * m_apf->tra_alfa_rot + m_joint_att_force_p * m_apf->target_alfa //target_alfa=10   5
-                  + m_joint_att_force_w * m_apf->target_alfa_rot + 2 * m_joint_rep_force;
+    Eigen::Matrix<double, 6, 1> att = Eigen::Matrix<double, 6, 1>::Zero();
+    att = m_joint_att_trajectory_p * m_apf->tra_alfa + m_joint_att_force_p * m_apf->target_alfa;
+    Eigen::Matrix<double, 6, 1> rep = Eigen::Matrix<double, 6, 1>::Zero();
+    rep = m_joint_rep_force;
+    m_all_force = att + rep;
+
+    // m_all_force = m_joint_att_trajectory_p * m_apf->tra_alfa                                                  //tra_alfa=1.2     0.6
+    //               + m_joint_att_trajectory_w * m_apf->tra_alfa_rot + m_joint_att_force_p * m_apf->target_alfa //target_alfa=10   5
+    //               + m_joint_att_force_w * m_apf->target_alfa_rot + m_joint_rep_force;
 }
 
 //获取局部轨迹跟随器的力
@@ -315,11 +321,12 @@ int ApfLocalPlanner::getTrajectoryForce()
         auto p_ = m_current_target_link_pose;
         Eigen::Quaterniond q0(p_.pose.orientation.w, p_.pose.orientation.x, p_.pose.orientation.y, p_.pose.orientation.z);
         Eigen::Quaterniond q1((*m_tcp_trajectory_iter).rotation());
+
         Eigen::Quaterniond q_next = q0.slerp(0.5, q1);
 
-        p_.pose.position.x += err_p(0, 0);
-        p_.pose.position.y += err_p(1, 0);
-        p_.pose.position.z += err_p(2, 0);
+        p_.pose.position.x += err_p(0, 0) * 0.01;
+        p_.pose.position.y += err_p(1, 0) * 0.01;
+        p_.pose.position.z += err_p(2, 0) * 0.01;
 
         p_.pose.orientation.w = q_next.w();
         p_.pose.orientation.x = q_next.x();
@@ -443,11 +450,13 @@ int ApfLocalPlanner::getTargetPoseForce()
     auto p_ = m_current_target_link_pose;
     Eigen::Quaterniond q0(p_.pose.orientation.w, p_.pose.orientation.x, p_.pose.orientation.y, p_.pose.orientation.z);
     Eigen::Quaterniond q1(m_target_pose_e.rotation());
-    Eigen::Quaterniond q_next = q0.slerp(0.2, q1);
+    double err = q0.angularDistance(q1);
+    double t = err > 1 ? 0.1 : (1 - err);
+    Eigen::Quaterniond q_next = q0.slerp(t, q1);
 
-    p_.pose.position.x += err_p(0, 0);
-    p_.pose.position.y += err_p(1, 0);
-    p_.pose.position.z += err_p(2, 0);
+    p_.pose.position.x += err_p(0, 0) * 0.01;
+    p_.pose.position.y += err_p(1, 0) * 0.01;
+    p_.pose.position.z += err_p(2, 0) * 0.01;
 
     p_.pose.orientation.w = q_next.w();
     p_.pose.orientation.x = q_next.x();
@@ -504,7 +513,7 @@ int ApfLocalPlanner::getObstacleForce()
                 double dis = m_current_p(k, 0) - m_obs_pose[j][k]; //第j个vector  第k个元素
                 obs_rep[i][j](k, 0) = m_apf->obs_eta[i] * (1 / m_obs_distance[i][j] - 1 / m_apf->safety_distance) *
                                       (1 / (m_obs_distance[i][j] * m_obs_distance[i][j])) * (dis / m_obs_distance[i][j]);
-                obs_rep[i][j](k, 0) = obs_rep[i][j](k, 0) * getRandon(2.0, 3.0); //防止陷入局部极小值      改    (1.3, 1.8)
+                obs_rep[i][j](k, 0) = obs_rep[i][j](k, 0) * getRandon(1.3, 1.8); //防止陷入局部极小值      改    (1.3, 1.8)
             }
             joint_rep_force[i][j] = m_jacobian_p[i] * obs_rep[i][j];
             //笛卡尔空间转关节空间    [6x3]  [3x1] =[6x1]
@@ -704,12 +713,11 @@ bool ApfLocalPlanner::IK(const geometry_msgs::PoseStamped &p, std::vector<double
     bool ret = false;
     moveit::core::RobotStatePtr robot_state = m_move_group->getCurrentState();
     const robot_model::JointModelGroup *joint_model_group = robot_state->getJointModelGroup(m_move_group->getName());
-    std::size_t attempts = 10;
+    int attempts = 10;
     double timeout = 0.5;
     int cnt = 0;
     while (ros::ok() && cnt < 5)
     {
-        // if(robot_state->setFromIK(joint_model_group, pose.pose, attempts, timeout))
         if (robot_state->setFromIK(joint_model_group, p.pose, m_eef, attempts, timeout))
         {
             ROS_INFO_STREAM("IK succeed");
