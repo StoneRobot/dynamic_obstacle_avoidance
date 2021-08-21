@@ -11,12 +11,11 @@
 #include <fstream>
 #include <iostream>
 
-#define CLAMP(x , min , max) ((x) > (max) ? (max) : ((x) < (min) ? (min) : x))
+#define CLAMP(x, min, max) ((x) > (max) ? (max) : ((x) < (min) ? (min) : x))
 using namespace std;
 
-int num=0;
+int num = 0;
 double Array[1000][3];
-
 
 ApfLocalPlanner::ApfLocalPlanner(ros::NodeHandle *nh, moveit::planning_interface::MoveGroupInterface *group)
     : ILocalPlanner{nh, group},
@@ -245,10 +244,10 @@ void ApfLocalPlanner::getObstacleDistance()
     getLinkPose();
     m_obs_distance.clear();
     m_obs_distance.resize(m_link_name.size());
-   
-        for (size_t i = 0; i < m_link_name.size(); ++i)
-       {
-         m_obs_distance[i].resize(m_obs_pose.size());
+
+    for (size_t i = 0; i < m_link_name.size(); ++i)
+    {
+        m_obs_distance[i].resize(m_obs_pose.size());
         for (size_t j = 0; j < m_obs_pose.size(); ++j)
         {
             m_obs_distance[i][j] = getDistance(m_link_pose_vec[i], m_obs_pose[j]);
@@ -295,48 +294,56 @@ int ApfLocalPlanner::getJointForce()
 //获取局部轨迹跟随器的力
 int ApfLocalPlanner::getTrajectoryForce()
 {
+    int ret = -1;
     //从全局轨迹中选取符合跟随器的点，如果符合返回true，如果机器人震荡，跟这个函数有关
     if (getNearbyPoint()) //哪个最近点
     {
-        Eigen::Vector3d euler_err;
         double position_err;
-        // Eigen::Vector3d euler_err1;
-
-        //姿态误差
-        getOrienError(m_current_target_link_pose, (*m_tcp_trajectory_iter), euler_err);
-
         //位置误差
         position_err = finishPosition(m_current_target_link_pose, (*m_tcp_trajectory_iter));
-        euler_err = getOrienError(m_current_target_link_pose, (*m_tcp_trajectory_iter)); ////
-
         //计算位置和姿态误差
         //人工势场法
+        // 位置
         Eigen::Matrix<double, 3, 1> err_p = Eigen::Matrix<double, 3, 1>::Identity();
-        Eigen::Matrix<double, 3, 1> err_w = Eigen::Matrix<double, 3, 1>::Identity();
         for (int i = 0; i < 3; ++i)
         {
             //后面乘以误差的倒数是为了自适应，建议调整公式
             err_p(i, 0) = -m_apf->tra_dist_att * m_apf->trajectory_zeta *
                           (m_current_p(i, 0) - (*m_tcp_trajectory_iter)(i, 3)) * (1 / abs(position_err)); //1.2*1*(  -  )* (1/())
-
-            //err_w(i, 0) = m_apf->tra_dist_att_config * m_apf->trajectory_zeta * euler_err(i) * (1 / abs(euler_err.sum()));
-            //0.5*1* R/P/Y /
         }
+        // 姿态
+        auto p_ = m_current_target_link_pose;
+        Eigen::Quaterniond q0(p_.pose.orientation.w, p_.pose.orientation.x, p_.pose.orientation.y, p_.pose.orientation.z);
+        Eigen::Quaterniond q1((*m_tcp_trajectory_iter).rotation());
+        Eigen::Quaterniond q_next = q0.slerp(0.5, q1);
 
-        //利用速度转移矩阵将pick_link的速度转移到link6
-        Eigen::MatrixXd link_volecity_v = m_volecity_transform.block<6, 3>(0, 0) * err_p; //         [6x3] [3x1] = 6x1
-        Eigen::MatrixXd link_volecity_w = m_volecity_transform.block<6, 3>(0, 3) * err_w; //         [6x3] [3x1] = 6x1
+        p_.pose.position.x += err_p(0, 0);
+        p_.pose.position.y += err_p(1, 0);
+        p_.pose.position.z += err_p(2, 0);
 
-        //Eigen::MatrixXd link_volecity_v = m_volecity_transform.block<3, 3>(0, 0) * err_p                   //    [3x3][3x1]+ [3x3][3x1]=[3x1]
-        //                                                         +  m_volecity_transform.block<3, 3>(0, 3) * err_w;
-        //Eigen::MatrixXd link_volecity_w = m_volecity_transform.block<3, 3>(3, 3) * err_w;                 //    [3x3][3x1]+ [3x3][3x1]=[3x1]
-
-        //用雅可比矩阵将末端速度转化为？
-        m_joint_att_trajectory_p = m_all_jacobian[m_link_name.size() - 2] * link_volecity_v;
-        //m_joint_att_trajectory_w = m_all_jacobian[m_link_name.size() - 2] * link_volecity_w;
-        return 0; //执行成功
+        p_.pose.orientation.w = q_next.w();
+        p_.pose.orientation.x = q_next.x();
+        p_.pose.orientation.y = q_next.y();
+        p_.pose.orientation.z = q_next.z();
+        int cnt = 0;
+        do
+        {
+            vector<double> joint;
+            if (!IK(p_, joint))
+                break;
+            if (finishJoint(m_current_joint_value, joint) < 1.57)
+            {
+                for (size_t i = 0; i < 6; i++)
+                {
+                    m_joint_att_trajectory_p(i, 0) = joint[i] - m_current_joint_value[i];
+                }
+                ret = 0;
+                break;
+            }
+            cnt++;
+        } while (ros::ok() && cnt < 8);
     }
-    return -1; //规划失败
+    return ret; //规划失败
 }
 
 bool ApfLocalPlanner::getNearbyPoint() //判断最近点
@@ -419,96 +426,56 @@ void ApfLocalPlanner::setTrajectoryIndex(int index, std::list<Eigen::Isometry3d>
 //目标跟随器的力
 int ApfLocalPlanner::getTargetPoseForce()
 {
-    // Eigen::Vector3d euler_err1;
-    Eigen::Vector3d euler_err;
+    int ret = -1;
+    // getOrienError(m_current_target_link_pose, m_target_pose_e, euler_err); //
     double position_err;
-
-    getOrienError(m_current_target_link_pose, m_target_pose_e, euler_err); //
-    //euler_err = getOrienError(m_current_target_link_pose, m_target_pose_e);   ////
     position_err = finishPosition(m_current_target_link_pose, (*m_tcp_trajectory_iter));
 
-    
-
-
-        static Eigen::Vector3d bubian ;
-
-    static int j = 0;
-    if (j== 0)
-    {
-        bubian = euler_err;
-        j++;
-       // j=0;
-    }
-
-
     Eigen::Matrix<double, 3, 1> err_p;
-    Eigen::Matrix<double, 3, 1> err_w;
-
-    double CC = sqrt(pow(euler_err(0), 2) + pow(euler_err(1), 2) + pow(euler_err(2), 2));
-    double cc = abs(pow(euler_err(0), 1 / 3) + pow(euler_err(1), 1 / 3) + pow(euler_err(2), 1 / 3));
-
     //人工势场法
     for (int i = 0; i < 3; ++i) //   for (int i = 2; i >-1;--i)     //
     {
         err_p(i, 0) = -m_apf->dist_att * m_apf->target_zeta *
                       (m_current_p(i, 0) - m_target_pose_e(i, 3)) * (1 / abs(position_err));
-
-/*          if (euler_err(i) < 0.5)
-            err_w(i, 0) = 0;
-        else */
-            //err_w(i, 0) = -0.2 * euler_err(i);
-  
-
-           int  n = 40;
-           if(euler_err(i)>2 || euler_err(i)<-2)
-                     err_w(i, 0) = -1.2*euler_err(i); 
-            else if(1<euler_err(i)<=2 || -2<=euler_err(i)<-1)
-                     err_w(i, 0) = 0.9*euler_err(i);    // -2*euler_err(i)/abs(euler_err(i)) ;
-            else  if(0.1<=euler_err(i)<=1 || -1<=euler_err(i)<=-0.1)
-                     err_w(i, 0) = 0.9* (euler_err(i));
-            else  if(0.03<=euler_err(i)<0.1)
-                     err_w(i, 0) =0.9* (euler_err(i));
-            else  if(-0.1<euler_err(i)<=-0.03)
-                     err_w(i, 0) = n* (euler_err(i));  //
-            else  if(0.01<=euler_err(i)<0.03)
-                     err_w(i, 0) = n* (euler_err(i));
-            else  if(-0.03<euler_err(i)<-0.01)
-                     err_w(i, 0) = n* (euler_err(i));      
-            else  err_w(i, 0) =0;    
-           
-
-        cout << " 相差角度：" << euler_err(i) << endl;
-        //cout << "   bubian：" << bubian(i) << endl;
-        // err_w(i, 0) = m_apf->dist_att_config * m_apf->target_zeta *euler_err(i) * (1 / abs(euler_err.sum()));
     }
-    //err_w = -0.1*bubian;
-    // Eigen::MatrixXd link_volecity_v = m_volecity_transform.block<6, 3>(0, 0) * err_p;                        //pick_link 转 link6
-    //Eigen::MatrixXd link_volecity_w = m_volecity_transform.block<6, 3>(0, 3) * err_w;
 
-    Eigen::Matrix<double, 6, 3> T_v;
-    Eigen::MatrixXd T_vw = m_volecity_transform.block<3, 3>(0, 3);
-    T_v << T_vw, Eigen::Matrix3d::Zero();
-    Eigen::MatrixXd link_volecity_v = m_volecity_transform.block<6, 3>(0, 0) * err_p + T_v * err_w; //[6x3][3x1]+ [6x3][3x1]=[6x1]
+    // 姿态
+    auto p_ = m_current_target_link_pose;
+    Eigen::Quaterniond q0(p_.pose.orientation.w, p_.pose.orientation.x, p_.pose.orientation.y, p_.pose.orientation.z);
+    Eigen::Quaterniond q1(m_target_pose_e.rotation());
+    Eigen::Quaterniond q_next = q0.slerp(0.2, q1);
 
-    Eigen::Matrix<double, 6, 3> T_w = (m_volecity_transform.block<3, 6>(3, 0)).transpose();
-    Eigen::MatrixXd link_volecity_w = T_w * err_w;             //    [6x3][3x1]+ [6x3][3x1]=[6x1]
+    p_.pose.position.x += err_p(0, 0);
+    p_.pose.position.y += err_p(1, 0);
+    p_.pose.position.z += err_p(2, 0);
 
-    m_joint_att_force_p = m_all_jacobian[m_link_name.size() - 2] * link_volecity_v;
-    //m_joint_att_force_w = m_all_jacobian[m_link_name.size() - 2] * link_volecity_w; // 需要调试？
-
-    return 0;
+    p_.pose.orientation.w = q_next.w();
+    p_.pose.orientation.x = q_next.x();
+    p_.pose.orientation.y = q_next.y();
+    p_.pose.orientation.z = q_next.z();
+    int cnt = 0;
+    do
+    {
+        vector<double> joint;
+        if (!IK(p_, joint))
+            break;
+        if (finishJoint(m_current_joint_value, joint) < 1.57)
+        {
+            for (size_t i = 0; i < 6; i++)
+            {
+                m_joint_att_force_p(i, 0) = joint[i] - m_current_joint_value[i];
+            }
+            ret = 0;
+            break;
+        }
+        cnt++;
+    } while (ros::ok() && cnt < 8);
+    return ret;
 }
 
 //获取排斥速度
 int ApfLocalPlanner::getObstacleForce()
 {
-    /*     static int i = 0;
-    if (i == 0)
-    {
-        // ...
-        i++;
-        i=0;
-    } */
     std::vector<std::vector<Eigen::Matrix<double, 6, 1>>> joint_rep_force;
     std::vector<std::vector<Eigen::Matrix<double, 3, 1>>> obs_rep;
     joint_rep_force.resize(m_link_name.size());
@@ -567,111 +534,7 @@ int ApfLocalPlanner::getLinkPose()
 //两个 getOrienError   &回传
 void ApfLocalPlanner::getOrienError(const geometry_msgs::PoseStamped &pc, const Eigen::Isometry3d &pt, Eigen::Vector3d &euler_angle)
 {
-    Eigen::Quaterniond q1c(pc.pose.orientation.w, pc.pose.orientation.x, pc.pose.orientation.y, pc.pose.orientation.z);
-    Eigen::Quaterniond q2t(pt.rotation());
-    
-    double x=q2t.x(), y=q2t.y(), z=q2t.z(), w=q2t.w();
-	double Roll  = atan2(2 * (w * z + x * y) , 1 - 2 * (z * z + x * x));
-	double Pitch = asin(CLAMP(2 * (w * x - y * z) , -1.0f , 1.0f));
-	double Yaw   = atan2(2 * (w * y + z * x) , 1 - 2 * (x * x + y * y));
-    
-    double x2=pc.pose.orientation.x, y2=pc.pose.orientation.y, z2=pc.pose.orientation.z, w2=pc.pose.orientation.w;
-	double Roll2  = atan2(2 * (w2 * z2 + x2 * y2) , 1 - 2 * (z2 * z2 + x2 * x2));
-	double Pitch2 = asin(CLAMP(2 * (w2 * x2 - y2 * z2) , -1.0f , 1.0f));
-	double Yaw2   = atan2(2 * (w2 * y2 + z2* x2) , 1 - 2 * (x2 * x2 + y2 * y2));
-    Eigen::Vector3d mu_biao2 = pt.rotation().eulerAngles(0,1,2);
-    Eigen::Vector3d mu_biao = q2t.toRotationMatrix().eulerAngles(0,1,2);
-    Eigen::Vector3d dang_qian = q1c.toRotationMatrix().eulerAngles(0,1,2);
-
-    cout << "当前欧拉角：" << dang_qian(0) << "  " << dang_qian(1) << "  " << dang_qian(2) << endl;  //
-    cout << "当前欧拉角2：" << Roll2<< "  " << Pitch2<< "  " << Yaw2 << endl;                               //自己写
-    cout << "目标欧拉角：" << mu_biao(0) << "  " << mu_biao(1) << "  " << mu_biao(2) << endl;
-    cout << "目标欧拉角2：" << mu_biao2(0) << "  " << mu_biao2(1) << "  " << mu_biao2(2) << endl;
-    cout << "目标欧拉角3：" << Roll<< "  " << Pitch<< "  " << Yaw << endl;                    //自己写
-    double angular_distance = q1c.angularDistance(q2t);
-    cout << "current: " << pc.pose.orientation << endl;
-    cout << "target: " << q2t.x() << " " << q2t.y() << " " << q2t.z() << " " << q2t.w() << " " << endl;
-    cout << "偏差角1：   " << angular_distance << endl;
-
-
-    Eigen::Quaterniond e_q = q1c.conjugate() * q2t;           //共轭
-    //共轭表示旋转轴不变，旋转角相反， (w,-x,-y,-z)
-
-    //euler_angle = e_q.matrix().eulerAngles(0, 1, 2);              //可能会有问题？
-        double xx= e_q.x(),  yy=e_q.y(),  zz=e_q.z(),  ww=e_q.w();
-        double Roll3  = atan2(2 * (ww * zz + xx * yy) , 1 - 2 * (zz * zz + xx * xx));
-	    double Pitch3 = asin(CLAMP(2 * (ww * xx - yy * zz) , -1.0f , 1.0f));
-	    double Yaw3   = atan2(2 * (ww * yy + zz * xx) , 1 - 2 * (xx * xx + yy * yy));
-         euler_angle = {Roll3, Pitch3, Yaw3};
-
-    //四元数球面线性插值
-    double i = 2, n = 9;
-
-    double t = i / n;
-    double omiga = acos(q1c.dot(q2t));
-    cout << "偏差角2：   " << omiga << endl;
-    double k0 = sin((1 - t) * omiga) / sin(omiga);
-    double k1 = sin(t * omiga) / sin(omiga);
-
-    double kk0 = 1 - t;
-    double kk1 = t;
-/*
-     //Eigen::Quaterniond  ct;
-    if (omiga >= 0.1)
-    {
-        if (q1c.dot(q2t) >= 0.0f)
-        {
-            Eigen::Quaterniond ct(q1c.w() * k0 + q2t.w() * k1, q1c.x() * k0 + q2t.x() * k1, q1c.y() * k0 + q2t.y() * k1, q1c.z() * k0 + q2t.z() * k1);
-            double xx= ct.x(),yy=ct.y(),zz=ct.z(),ww=ct.w();
-            double Roll  = atan2(2 * (ww * zz + xx * yy) , 1 - 2 * (zz * zz + xx * xx));
-	        double Pitch = asin(CLAMP(2 * (ww * xx - yy * zz) , -1.0f , 1.0f));
-	        double Yaw   = atan2(2 * (ww * yy + zz * xx) , 1 - 2 * (xx * xx + yy * yy));
-            euler_angle = {Roll, Pitch,Yaw};
-        }
-
-        else if (q1c.dot(q2t) < 0.0f)
-        {
-            Eigen::Quaterniond ct(q1c.w() * k0 - q2t.w() * k1, q1c.x() * k0 - q2t.x() * k1, q1c.y() * k0 - q2t.y() * k1, q1c.z() * k0 - q2t.z() * k1);
-            //euler_angle = ct.toRotationMatrix().eulerAngles(0, 1, 2);
-            double xx= ct.x(),yy=ct.y(),zz=ct.z(),ww=ct.w();
-            double Roll  = atan2(2 * (ww * zz + xx * yy) , 1 - 2 * (zz * zz + xx * xx));
-	        double Pitch = asin(CLAMP(2 * (ww * xx - yy * zz) , -1.0f , 1.0f));
-	        double Yaw   = atan2(2 * (ww * yy + zz * xx) , 1 - 2 * (xx * xx + yy * yy));
-            euler_angle = {Roll, Pitch,Yaw};
-        }
-    }
-    else if (0.1 < omiga )
-    {
-        Eigen::Quaterniond ct(q1c.w() * kk0 + q2t.w() * kk1, q1c.x() * kk0 + q2t.x() * kk1, q1c.y() * kk0 + q2t.y() * kk1, q1c.z() * kk0 + q2t.z() * kk1);
-        cout << q1c.w() * kk0 + q2t.w() * kk1 << endl;
-        //Eigen::Quaterniond ct(q1c.w()* kk0 - q2t.w()*kk1,     q1c.x()*kk0 - q2t.x()*kk1,    q1c.y()*kk0 - q2t.y()*kk1,    q1c.z()* kk0  - q2t.z()*kk1);
-        //euler_angle = ct.toRotationMatrix().eulerAngles(0, 1, 2);
-            double xx= ct.x(),yy=ct.y(),zz=ct.z(),ww=ct.w();
-            double Roll  = atan2(2 * (ww * zz + xx * yy) , 1 - 2 * (zz * zz + xx * xx));
-	        double Pitch = asin(CLAMP(2 * (ww * xx - yy * zz) , -1.0f , 1.0f));
-	        double Yaw   = atan2(2 * (ww * yy + zz * xx) , 1 - 2 * (xx * xx + yy * yy));
-            euler_angle = {Roll, Pitch,Yaw};
-    } */
-
-
-    //else
-        //euler_angle = {0, 0, 0}; 
-
-    // if ((abs(euler_angle(0)) +abs(euler_angle(1)) + abs(euler_angle(2))) > M_PI / 2 * 3)
-    // {
-    //     for (size_t i = 0; i < 3; i++)
-    //     {
-    //         if(euler_angle(i) > 0)
-    //             euler_angle(i) = euler_angle(i) - M_PI;
-    //         else if(euler_angle(i) < 0)
-    //             euler_angle(i) = euler_angle(i) + M_PI;
-    //     }
-    // }
-    // ROS_INFO_STREAM("euler1: " << euler_angle);
-    //double e = q1c.angularDistance(q2t);         //e？
 }
-
-
 
 Eigen::Vector3d ApfLocalPlanner::getOrienError(const geometry_msgs::PoseStamped &p, const Eigen::Isometry3d &p2)
 {
@@ -690,25 +553,24 @@ double ApfLocalPlanner::finishPosition(const geometry_msgs::PoseStamped &s, cons
     current_position << s.pose.position.x, s.pose.position.y, s.pose.position.z;
 
     cout << "当前位置点：" << s.pose.position.x << "  " << s.pose.position.y << "  " << s.pose.position.z << endl;
-    
+
     Array[num][0] = s.pose.position.x;
     Array[num][1] = s.pose.position.y;
     Array[num][2] = s.pose.position.z;
-    num ++;
-    
-    ofstream ofile;
-    ofile.open("/home/fshs/catkin_ws/avoid_first.txt",ios::out | ios::trunc);
+    num++;
 
-    for(int i=0; i<num; i++)						// 写入数据
-	    {
-	         ofile << Array[i][0]<< "," <<  Array[i][1] << "," <<Array[i][2] << endl;
-             //ofile<<std::endl;
-             //fprintf(fp, "%f,%f,%f\n",  Array[i][0], Array[i][1], Array[i][2]);
-	    }          
+    ofstream ofile;
+    ofile.open("/home/fshs/catkin_ws/avoid_first.txt", ios::out | ios::trunc);
+
+    for (int i = 0; i < num; i++) // 写入数据
+    {
+        ofile << Array[i][0] << "," << Array[i][1] << "," << Array[i][2] << endl;
+        //ofile<<std::endl;
+        //fprintf(fp, "%f,%f,%f\n",  Array[i][0], Array[i][1], Array[i][2]);
+    }
     ofile.close();
 
-   
-    Eigen::Matrix<double, 3, 1> target_position; 
+    Eigen::Matrix<double, 3, 1> target_position;
     target_position << t(0, 3), t(1, 3), t(2, 3);
     cout << "目标位置点：" << t(0, 3) << "  " << t(1, 3) << "  " << t(2, 3) << endl;
     Eigen::Matrix<double, 3, 1> err = current_position - target_position;
@@ -718,11 +580,6 @@ double ApfLocalPlanner::finishPosition(const geometry_msgs::PoseStamped &s, cons
 
 double ApfLocalPlanner::finishOrien(const geometry_msgs::PoseStamped &s, const Eigen::Isometry3d &t)
 {
-    // Eigen::Vector3d err;
-    // // getOrienError(s, t, err);
-    // err = getOrienError(s, t);
-    // double err_sum = err.sum();
-    // return abs(err_sum);
     Eigen::Quaterniond q1c(s.pose.orientation.w, s.pose.orientation.x, s.pose.orientation.y, s.pose.orientation.z);
     Eigen::Quaterniond q2t(t.rotation());         //使用旋转矩阵来对四元數进行初始化
     Eigen::Quaterniond e_q = q2t * q1c.inverse(); //求逆
@@ -840,4 +697,28 @@ double ApfLocalPlanner::getRandon(double a, double b)
     double i = dis(gen);
     // ROS_INFO_STREAM("random" << i);
     return i;
+}
+
+bool ApfLocalPlanner::IK(const geometry_msgs::PoseStamped &p, std::vector<double> &j)
+{
+    bool ret = false;
+    moveit::core::RobotStatePtr robot_state = m_move_group->getCurrentState();
+    const robot_model::JointModelGroup *joint_model_group = robot_state->getJointModelGroup(m_move_group->getName());
+    std::size_t attempts = 10;
+    double timeout = 0.5;
+    int cnt = 0;
+    while (ros::ok() && cnt < 5)
+    {
+        // if(robot_state->setFromIK(joint_model_group, pose.pose, attempts, timeout))
+        if (robot_state->setFromIK(joint_model_group, p.pose, m_eef, attempts, timeout))
+        {
+            ROS_INFO_STREAM("IK succeed");
+            ret = true;
+            robot_state->copyJointGroupPositions(joint_model_group, j);
+            break;
+        }
+        cnt++;
+        ROS_INFO_STREAM("IK cnt: " << cnt);
+    }
+    return ret;
 }

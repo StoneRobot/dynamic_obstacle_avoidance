@@ -11,10 +11,12 @@ find_package(catkin REQUIRED COMPONENTS
   message_generation
   moveit_core
   moveit_ros_planning_interface
-  moveit_servo
+  # moveit_servo
   roscpp
   std_msgs
 )
+
+find_package(Eigen3 REQUIRED COMPONENTS)
 
 
 ## System dependencies are found with CMake's conventions
